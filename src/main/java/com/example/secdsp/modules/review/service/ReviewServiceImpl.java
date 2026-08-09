@@ -1,8 +1,6 @@
 package com.example.secdsp.modules.review.service;
 
-import com.example.secdsp.common.exception.BusinessException;
-import com.example.secdsp.common.exception.ResourceNotFoundException;
-import com.example.secdsp.common.exception.UnauthorizedException;
+import com.example.secdsp.common.exception.*;
 import com.example.secdsp.common.util.SecurityUtils;
 import com.example.secdsp.modules.order.entity.OrderStatus;
 import com.example.secdsp.modules.order.repository.OrderItemRepository;
@@ -18,11 +16,13 @@ import com.example.secdsp.modules.user.entity.User;
 import com.example.secdsp.modules.user.entity.UserRole;
 import com.example.secdsp.modules.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional
@@ -34,12 +34,33 @@ public class ReviewServiceImpl implements ReviewService {
     private final UserRepository userRepository;
 
     @Override
-    public ReviewResponse createReview(Long productId, CreateReviewRequest request) {
+    public ReviewResponse createReview(
+        Long productId,
+        CreateReviewRequest request
+    ) {
 
-        Long userId = SecurityUtils.getCurrentUserId();
+        Long userId = requireCurrentUserId();
 
-        if (reviewRepository.existsByProduct_IdAndUser_Id(productId, userId)) {
-            throw new BusinessException("You already reviewed this product");
+        log.info(
+            "User {} attempting to create review for product {}",
+            userId,
+            productId
+        );
+
+        Product product = productRepository.findById(productId)
+            .orElseThrow(() ->
+                             new ResourceNotFoundException("Product", productId)
+            );
+
+        if (reviewRepository.existsByProduct_IdAndUser_Id(
+            productId,
+            userId
+        )) {
+
+            throw new BusinessException(
+                ErrorCode.RESOURCE_ALREADY_EXISTS,
+                "You already reviewed this product."
+            );
         }
 
         boolean purchased = orderItemRepository
@@ -50,11 +71,11 @@ public class ReviewServiceImpl implements ReviewService {
             );
 
         if (!purchased) {
-            throw new BusinessException("You can only review products you purchased");
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "You can only review products you purchased."
+            );
         }
-
-        Product product = productRepository.findById(productId)
-            .orElseThrow(() -> new ResourceNotFoundException("Product", productId));
 
         User user = userRepository.getReferenceById(userId);
 
@@ -64,23 +85,51 @@ public class ReviewServiceImpl implements ReviewService {
         review.setRating(request.rating());
         review.setComment(request.comment());
 
-        return mapToResponse(reviewRepository.save(review));
+        ProductReview savedReview = reviewRepository.save(review);
+
+        log.info(
+            "Review {} created successfully for product {} by user {}",
+            savedReview.getId(),
+            productId,
+            userId
+        );
+
+        return mapToResponse(savedReview);
     }
 
     @Override
-    public ReviewResponse updateReview(Long reviewId, UpdateReviewRequest request) {
+    public ReviewResponse updateReview(
+        Long reviewId,
+        UpdateReviewRequest request
+    ) {
+
+        Long currentUserId = requireCurrentUserId();
+
+        log.info(
+            "User {} attempting to update review {}",
+            currentUserId,
+            reviewId
+        );
 
         ProductReview review = reviewRepository.findById(reviewId)
-            .orElseThrow(() -> new ResourceNotFoundException("Review", reviewId));
-
-        Long currentUserId = SecurityUtils.getCurrentUserId();
+            .orElseThrow(() ->
+                             new ResourceNotFoundException("Review", reviewId)
+            );
 
         if (!review.getUser().getId().equals(currentUserId)) {
-            throw new UnauthorizedException("You cannot update this review");
+            throw new ForbiddenException(
+                "You cannot update this review."
+            );
         }
 
         review.setRating(request.rating());
         review.setComment(request.comment());
+
+        log.info(
+            "Review {} updated successfully by user {}",
+            reviewId,
+            currentUserId
+        );
 
         return mapToResponse(review);
     }
@@ -88,24 +137,55 @@ public class ReviewServiceImpl implements ReviewService {
     @Override
     public void deleteReview(Long reviewId) {
 
+        Long currentUserId = requireCurrentUserId();
+
+        log.info(
+            "User {} attempting to delete review {}",
+            currentUserId,
+            reviewId
+        );
+
         ProductReview review = reviewRepository.findById(reviewId)
-            .orElseThrow(() -> new ResourceNotFoundException("Review", reviewId));
+            .orElseThrow(() ->
+                             new ResourceNotFoundException("Review", reviewId)
+            );
 
-        Long currentUserId = SecurityUtils.getCurrentUserId();
+        boolean isOwner =
+            review.getUser().getId().equals(currentUserId);
 
-        if (!review.getUser().getId().equals(currentUserId)
-            && !SecurityUtils.hasRole(UserRole.ADMIN)) {
-            throw new UnauthorizedException("You cannot delete this review");
+        boolean isAdmin =
+            SecurityUtils.hasRole(UserRole.ADMIN);
+
+        if (!isOwner && !isAdmin) {
+            throw new ForbiddenException(
+                "You cannot delete this review."
+            );
         }
 
         reviewRepository.delete(review);
+
+        log.info(
+            "Review {} deleted successfully by user {}",
+            reviewId,
+            currentUserId
+        );
     }
 
     @Override
     @Transactional(readOnly = true)
-    public Page<ReviewResponse> getReviews(Long productId, Pageable pageable) {
+    public Page<ReviewResponse> getReviews(
+        Long productId,
+        Pageable pageable
+    ) {
 
-        return reviewRepository.findByProduct_Id(productId, pageable)
+        log.debug(
+            "Fetching reviews for product {} with pageable {}",
+            productId,
+            pageable
+        );
+
+        return reviewRepository
+            .findByProduct_Id(productId, pageable)
             .map(this::mapToResponse);
     }
 
@@ -113,15 +193,53 @@ public class ReviewServiceImpl implements ReviewService {
     @Transactional(readOnly = true)
     public RatingSummaryResponse getRatingSummary(Long productId) {
 
-        Object[] result = reviewRepository.getRatingSummary(productId);
+        log.debug(
+            "Fetching rating summary for product {}",
+            productId
+        );
 
-        Double avg = result[0] != null ? (Double) result[0] : 0.0;
-        Long count = result[1] != null ? (Long) result[1] : 0L;
+        Object[] result =
+            reviewRepository.getRatingSummary(productId);
 
-        return new RatingSummaryResponse(avg, count);
+        Number avgValue = result[0] instanceof Number
+            ? (Number) result[0]
+            : null;
+
+        Number countValue = result[1] instanceof Number
+            ? (Number) result[1]
+            : null;
+
+        double averageRating =
+            avgValue != null
+                ? avgValue.doubleValue()
+                : 0.0;
+
+        long reviewCount =
+            countValue != null
+                ? countValue.longValue()
+                : 0L;
+
+        return new RatingSummaryResponse(
+            averageRating,
+            reviewCount
+        );
+    }
+
+    private Long requireCurrentUserId() {
+
+        Long userId = SecurityUtils.getCurrentUserId();
+
+        if (userId == null) {
+            throw new UnauthorizedException(
+                "Authentication required."
+            );
+        }
+
+        return userId;
     }
 
     private ReviewResponse mapToResponse(ProductReview review) {
+
         return new ReviewResponse(
             review.getId(),
             review.getUser().getId(),
