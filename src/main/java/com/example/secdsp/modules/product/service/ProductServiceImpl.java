@@ -1,8 +1,6 @@
 package com.example.secdsp.modules.product.service;
 
-import com.example.secdsp.common.exception.BusinessException;
-import com.example.secdsp.common.exception.ResourceNotFoundException;
-import com.example.secdsp.common.exception.UnauthorizedException;
+import com.example.secdsp.common.exception.*;
 import com.example.secdsp.common.util.SecurityUtils;
 import com.example.secdsp.infrastructure.cloudinary.CloudinaryService;
 import com.example.secdsp.modules.category.dto.internal.CategoryInfo;
@@ -59,7 +57,10 @@ public class ProductServiceImpl implements ProductService {
     @Transactional
     public ProductResponse createProduct(CreateProductRequest request) {
 
-        log.info("Attempting to create product with name: {}", request.getName());
+        log.info(
+            "Attempting to create product with name: {}",
+            request.getName()
+        );
 
         Long currentUserId = SecurityUtils.getCurrentUserId();
 
@@ -72,12 +73,20 @@ public class ProductServiceImpl implements ProductService {
         UserInfo userInfo = userService.getUserInfo(currentUserId);
 
         if (userInfo.status() != UserStatus.ACTIVE) {
-            throw new BusinessException("User account is not active.");
+            throw new BusinessException(
+                ErrorCode.BUSINESS_ERROR,
+                "User account is not active."
+            );
         }
 
         Product product = productMapper.toEntity(request);
 
-        product.setSlug(generateUniqueSlug(request.getName(), null));
+        product.setSlug(
+            generateUniqueSlug(
+                request.getName(),
+                null
+            )
+        );
 
         User sellerRef = new User();
         sellerRef.setId(userInfo.id());
@@ -86,7 +95,9 @@ public class ProductServiceImpl implements ProductService {
         if (request.getCategoryId() != null) {
 
             CategoryInfo categoryInfo =
-                categoryService.getCategoryInfo(request.getCategoryId());
+                categoryService.getCategoryInfo(
+                    request.getCategoryId()
+                );
 
             Category categoryRef = new Category();
             categoryRef.setId(categoryInfo.id());
@@ -95,25 +106,48 @@ public class ProductServiceImpl implements ProductService {
         }
 
         if (request.getImages() != null) {
-            handleProductImagesForCreate(product, request.getImages());
+            handleProductImagesForCreate(
+                product,
+                request.getImages()
+            );
         }
 
         if (request.getAttributes() != null) {
-            handleProductAttributesForCreate(product, request.getAttributes());
+            handleProductAttributesForCreate(
+                product,
+                request.getAttributes()
+            );
         }
 
         Product saved = productRepository.save(product);
-        log.info("Product created successfully with ID: {}", saved.getId());
+
+        log.info(
+            "Product created successfully with ID: {}",
+            saved.getId()
+        );
+
         return productMapper.toProductResponse(saved);
     }
 
+    @Override
     @Transactional
-    public ProductResponse updateProduct(Long id, UpdateProductRequest request) {
+    public ProductResponse updateProduct(
+        Long id,
+        UpdateProductRequest request
+    ) {
 
-        log.info("Attempting to update product with ID: {}", id);
+        log.info(
+            "Attempting to update product with ID: {}",
+            id
+        );
 
         Product existingProduct = productRepository.findById(id)
-            .orElseThrow(() -> new ResourceNotFoundException("Product", id));
+            .orElseThrow(() ->
+                             new ResourceNotFoundException(
+                                 "Product",
+                                 id
+                             )
+            );
 
         checkProductOwnership(existingProduct);
 
@@ -121,6 +155,7 @@ public class ProductServiceImpl implements ProductService {
 
             if (request.getPrice().compareTo(BigDecimal.ZERO) <= 0) {
                 throw new BusinessException(
+                    ErrorCode.INVALID_REQUEST,
                     "Giá sản phẩm phải lớn hơn 0."
                 );
             }
@@ -143,20 +178,28 @@ public class ProductServiceImpl implements ProductService {
             }
         }
 
-        // ✅ Slug update nếu name đổi
-        if (request.getName() != null &&
-            !request.getName().equals(existingProduct.getName())) {
+        if (request.getName() != null
+            && !request.getName().equals(existingProduct.getName())) {
 
             existingProduct.setSlug(
-                generateUniqueSlug(request.getName(), id)
+                generateUniqueSlug(
+                    request.getName(),
+                    id
+                )
             );
         }
 
-        productMapper.updateProductFromDto(request, existingProduct);
+        productMapper.updateProductFromDto(
+            request,
+            existingProduct
+        );
 
         if (request.getCategoryId() != null) {
+
             CategoryInfo categoryInfo =
-                categoryService.getCategoryInfo(request.getCategoryId());
+                categoryService.getCategoryInfo(
+                    request.getCategoryId()
+                );
 
             Category categoryRef = new Category();
             categoryRef.setId(categoryInfo.id());
@@ -164,56 +207,101 @@ public class ProductServiceImpl implements ProductService {
             existingProduct.setCategory(categoryRef);
         }
 
-        Product updatedProduct = productRepository.save(existingProduct);
+        Product updatedProduct =
+            productRepository.save(existingProduct);
 
-        log.info("Product updated successfully with ID: {}", updatedProduct.getId());
+        log.info(
+            "Product updated successfully with ID: {}",
+            updatedProduct.getId()
+        );
 
-        return productMapper.toProductResponse(updatedProduct);
+        return productMapper.toProductResponse(
+            updatedProduct
+        );
     }
 
     @Override
     @Transactional
     public void deleteProduct(Long id) {
 
-        log.info("Attempting to delete product with ID: {}", id);
+        log.info(
+            "Attempting to delete product with ID: {}",
+            id
+        );
 
         Product product = productRepository.findById(id)
-            .orElseThrow(() -> new ResourceNotFoundException("Product", id));
+            .orElseThrow(() ->
+                             new ResourceNotFoundException(
+                                 "Product",
+                                 id
+                             )
+            );
 
         checkProductOwnership(product);
 
-        List<String> publicIds = product.getProductImages().stream()
-            .map(ProductImage::getPublicId)
-            .filter(Objects::nonNull)
-            .toList();
+        List<String> publicIds =
+            product.getProductImages()
+                .stream()
+                .map(ProductImage::getPublicId)
+                .filter(Objects::nonNull)
+                .toList();
 
         productRepository.delete(product);
 
         if (!publicIds.isEmpty()) {
+
             TransactionSynchronizationManager.registerSynchronization(
                 new TransactionSynchronization() {
+
                     @Override
                     public void afterCommit() {
+
                         try {
-                            cloudinaryService.deleteImagesBulk(publicIds);
-                            log.info("Bulk deleted Cloudinary images: {}", publicIds);
+
+                            cloudinaryService.deleteImagesBulk(
+                                publicIds
+                            );
+
+                            log.info(
+                                "Bulk deleted Cloudinary images: {}",
+                                publicIds
+                            );
+
                         } catch (Exception e) {
-                            log.error("Failed to bulk delete Cloudinary images", e);
+
+                            log.error(
+                                "Failed to bulk delete Cloudinary images",
+                                e
+                            );
                         }
                     }
                 }
             );
         }
 
-        log.info("Product {} deleted successfully.", id);
+        log.info(
+            "Product {} deleted successfully.",
+            id
+        );
     }
 
     @Override
     @Transactional(readOnly = true)
     public ProductDetailResponse getProductById(Long id) {
-        log.debug("Fetching product by ID: {}", id);
+
+        log.debug(
+            "Fetching product by ID: {}",
+            id
+        );
+
         Product product = productRepository.findById(id)
-            .orElseThrow(() -> new ResourceNotFoundException("Product", id));
+            .orElseThrow(() ->
+                             new ResourceNotFoundException(
+                                 "Product",
+                                 id
+                             )
+            );
+
         return productMapper.toProductDetailResponse(product);
     }
 
@@ -225,11 +313,22 @@ public class ProductServiceImpl implements ProductService {
         Long sellerId,
         Pageable pageable
     ) {
+
         log.debug(
             "Fetching products with keyword: {}, categoryId: {}, sellerId: {}, pageable: {}",
-            keyword, categoryId, sellerId, pageable
+            keyword,
+            categoryId,
+            sellerId,
+            pageable
         );
-        return productRepository.searchProducts(keyword, categoryId, sellerId, pageable)
+
+        return productRepository
+            .searchProducts(
+                keyword,
+                categoryId,
+                sellerId,
+                pageable
+            )
             .map(productMapper::toProductResponse);
     }
 
@@ -239,7 +338,11 @@ public class ProductServiceImpl implements ProductService {
 
         Product product = productRepository.findById(id)
             .orElseThrow(() ->
-                             new ResourceNotFoundException("Product", id));
+                             new ResourceNotFoundException(
+                                 "Product",
+                                 id
+                             )
+            );
 
         return new ProductInfo(
             product.getId(),
@@ -254,11 +357,17 @@ public class ProductServiceImpl implements ProductService {
 
     @Override
     @Transactional(readOnly = true)
-    public List<PriceHistoryResponse> getPriceHistory(Long productId) {
+    public List<PriceHistoryResponse> getPriceHistory(
+        Long productId
+    ) {
 
         Product product = productRepository.findById(productId)
             .orElseThrow(() ->
-                             new ResourceNotFoundException("Product", productId));
+                             new ResourceNotFoundException(
+                                 "Product",
+                                 productId
+                             )
+            );
 
         checkProductOwnership(product);
 
@@ -271,11 +380,15 @@ public class ProductServiceImpl implements ProductService {
 
     @Override
     @Transactional(readOnly = true)
-    public ProductSummaryInfo getSellerProductSummary(Long sellerId) {
+    public ProductSummaryInfo getSellerProductSummary(
+        Long sellerId
+    ) {
 
-        long total = productRepository.countBySeller_Id(sellerId);
-        long active = productRepository
-            .countBySeller_IdAndStatus(
+        long total =
+            productRepository.countBySeller_Id(sellerId);
+
+        long active =
+            productRepository.countBySeller_IdAndStatus(
                 sellerId,
                 ProductStatus.ACTIVE
             );
@@ -292,7 +405,10 @@ public class ProductServiceImpl implements ProductService {
     ) {
 
         if (imageRequests.size() > MAX_PRODUCT_IMAGES) {
-            throw new BusinessException("Maximum 5 images allowed per product.");
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Maximum 5 images allowed per product."
+            );
         }
 
         Set<String> imageUrls = new HashSet<>();
@@ -300,38 +416,78 @@ public class ProductServiceImpl implements ProductService {
 
         for (AddProductImageRequest imageRequest : imageRequests) {
 
-            if (!imageUrls.add(imageRequest.getImageUrl().toLowerCase())) {
-                throw new BusinessException("Duplicate image URL found: " + imageRequest.getImageUrl());
+            if (!imageUrls.add(
+                imageRequest.getImageUrl().toLowerCase()
+            )) {
+
+                throw new BusinessException(
+                    ErrorCode.BUSINESS_ERROR,
+                    "Duplicate image URL found: "
+                        + imageRequest.getImageUrl()
+                );
             }
 
             if (imageRequest.isPrimary()) {
+
                 if (primaryFound) {
-                    throw new BusinessException("Only one primary image is allowed per product.");
+                    throw new BusinessException(
+                        ErrorCode.INVALID_REQUEST,
+                        "Only one primary image is allowed per product."
+                    );
                 }
+
                 primaryFound = true;
             }
 
-            ProductImage productImage = productMapper.toProductImage(imageRequest);
+            ProductImage productImage =
+                productMapper.toProductImage(imageRequest);
+
             productImage.setProduct(product);
 
             product.getProductImages().add(productImage);
         }
 
-        if (!primaryFound && !product.getProductImages().isEmpty()) {
-            product.getProductImages().get(0).setPrimary(true);
+        if (!primaryFound
+            && !product.getProductImages().isEmpty()) {
+
+            product.getProductImages()
+                .get(0)
+                .setPrimary(true);
         }
     }
 
-    private void handleProductAttributesForCreate(Product product, List<AddProductAttributeRequest> attributeRequests) {
+    private void handleProductAttributesForCreate(
+        Product product,
+        List<AddProductAttributeRequest> attributeRequests
+    ) {
+
         Set<String> attributeNames = new HashSet<>();
 
-        for (AddProductAttributeRequest attributeRequest : attributeRequests) {
-            if (!attributeNames.add(attributeRequest.getAttributeName().toLowerCase())) {
-                throw new BusinessException("Duplicate attribute name found: " + attributeRequest.getAttributeName());
+        for (AddProductAttributeRequest attributeRequest
+            : attributeRequests) {
+
+            if (!attributeNames.add(
+                attributeRequest
+                    .getAttributeName()
+                    .toLowerCase()
+            )) {
+
+                throw new BusinessException(
+                    ErrorCode.BUSINESS_ERROR,
+                    "Duplicate attribute name found: "
+                        + attributeRequest.getAttributeName()
+                );
             }
-            ProductAttribute productAttribute = productMapper.toProductAttribute(attributeRequest);
+
+            ProductAttribute productAttribute =
+                productMapper.toProductAttribute(
+                    attributeRequest
+                );
+
             productAttribute.setProduct(product);
-            product.getProductAttributes().add(productAttribute);
+
+            product.getProductAttributes()
+                .add(productAttribute);
         }
     }
 
@@ -341,80 +497,140 @@ public class ProductServiceImpl implements ProductService {
     ) {
 
         if (imageRequests.size() > MAX_PRODUCT_IMAGES) {
-            throw new BusinessException("Maximum 5 images allowed per product.");
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Maximum 5 images allowed per product."
+            );
         }
 
         Set<String> imageUrls = new HashSet<>();
         boolean primaryFound = false;
 
-        // Existing images
         Map<Long, ProductImage> existingImagesMap =
-            product.getProductImages().stream()
-                .collect(Collectors.toMap(ProductImage::getId, Function.identity()));
+            product.getProductImages()
+                .stream()
+                .collect(
+                    Collectors.toMap(
+                        ProductImage::getId,
+                        Function.identity()
+                    )
+                );
 
         Set<String> oldPublicIds =
-            product.getProductImages().stream()
+            product.getProductImages()
+                .stream()
                 .map(ProductImage::getPublicId)
+                .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
 
         product.getProductImages().clear();
 
         Set<String> newPublicIds = new HashSet<>();
 
-        for (UpdateProductImageRequest imageRequest : imageRequests) {
+        for (UpdateProductImageRequest imageRequest
+            : imageRequests) {
 
-            if (!imageUrls.add(imageRequest.getImageUrl().toLowerCase())) {
-                throw new BusinessException("Duplicate image URL found: " + imageRequest.getImageUrl());
+            if (!imageUrls.add(
+                imageRequest.getImageUrl().toLowerCase()
+            )) {
+
+                throw new BusinessException(
+                    ErrorCode.BUSINESS_ERROR,
+                    "Duplicate image URL found: "
+                        + imageRequest.getImageUrl()
+                );
             }
 
             if (imageRequest.isPrimary()) {
+
                 if (primaryFound) {
-                    throw new BusinessException("Only one primary image is allowed per product.");
+                    throw new BusinessException(
+                        ErrorCode.INVALID_REQUEST,
+                        "Only one primary image is allowed per product."
+                    );
                 }
+
                 primaryFound = true;
             }
 
             ProductImage imageToPersist;
 
             if (imageRequest.getId() != null) {
-                imageToPersist = existingImagesMap.get(imageRequest.getId());
+
+                imageToPersist =
+                    existingImagesMap.get(
+                        imageRequest.getId()
+                    );
 
                 if (imageToPersist == null) {
-                    throw new ResourceNotFoundException("ProductImage", imageRequest.getId());
+                    throw new ResourceNotFoundException(
+                        "ProductImage",
+                        imageRequest.getId()
+                    );
                 }
 
             } else {
+
                 imageToPersist = new ProductImage();
             }
 
-            imageToPersist.setImageUrl(imageRequest.getImageUrl());
-            imageToPersist.setPublicId(imageRequest.getPublicId());
-            imageToPersist.setPrimary(imageRequest.isPrimary());
+            imageToPersist.setImageUrl(
+                imageRequest.getImageUrl()
+            );
+
+            imageToPersist.setPublicId(
+                imageRequest.getPublicId()
+            );
+
+            imageToPersist.setPrimary(
+                imageRequest.isPrimary()
+            );
+
             imageToPersist.setProduct(product);
 
-            newPublicIds.add(imageRequest.getPublicId());
+            if (imageRequest.getPublicId() != null) {
+                newPublicIds.add(
+                    imageRequest.getPublicId()
+                );
+            }
 
-            product.getProductImages().add(imageToPersist);
+            product.getProductImages()
+                .add(imageToPersist);
         }
 
-        if (!primaryFound && !product.getProductImages().isEmpty()) {
-            product.getProductImages().get(0).setPrimary(true);
+        if (!primaryFound
+            && !product.getProductImages().isEmpty()) {
+
+            product.getProductImages()
+                .get(0)
+                .setPrimary(true);
         }
 
-        // ✅ Find removed images
-        Set<String> removedPublicIds = new HashSet<>(oldPublicIds);
+        Set<String> removedPublicIds =
+            new HashSet<>(oldPublicIds);
+
         removedPublicIds.removeAll(newPublicIds);
 
         if (!removedPublicIds.isEmpty()) {
 
             TransactionSynchronizationManager.registerSynchronization(
                 new TransactionSynchronization() {
+
                     @Override
                     public void afterCommit() {
+
                         try {
-                            cloudinaryService.deleteImagesBulk(removedPublicIds);
+
+                            cloudinaryService.deleteImagesBulk(
+                                removedPublicIds
+                            );
+
                         } catch (Exception e) {
-                            log.error("Failed to bulk delete images", e);
+
+                            log.error(
+                                "Failed to bulk delete images",
+                                e
+                            );
                         }
                     }
                 }
@@ -426,72 +642,123 @@ public class ProductServiceImpl implements ProductService {
         Product product,
         List<UpdateProductAttributeRequest> attributeRequests
     ) {
+
         Set<String> attributeNames = new HashSet<>();
 
-        // Collect existing attributes into a map for efficient lookup
-        Map<Long, ProductAttribute> existingAttributesMap = product.getProductAttributes().stream()
-            .collect(Collectors.toMap(ProductAttribute::getId, Function.identity()));
+        Map<Long, ProductAttribute> existingAttributesMap =
+            product.getProductAttributes()
+                .stream()
+                .collect(
+                    Collectors.toMap(
+                        ProductAttribute::getId,
+                        Function.identity()
+                    )
+                );
 
-        // Clear existing collection and rebuild it to correctly manage orphanRemoval
         product.getProductAttributes().clear();
 
-        for (UpdateProductAttributeRequest attributeRequest : attributeRequests) {
-            if (!attributeNames.add(attributeRequest.getAttributeName().toLowerCase())) {
-                throw new BusinessException("Duplicate attribute name found: " + attributeRequest.getAttributeName());
+        for (UpdateProductAttributeRequest attributeRequest
+            : attributeRequests) {
+
+            if (!attributeNames.add(
+                attributeRequest
+                    .getAttributeName()
+                    .toLowerCase()
+            )) {
+
+                throw new BusinessException(
+                    ErrorCode.BUSINESS_ERROR,
+                    "Duplicate attribute name found: "
+                        + attributeRequest.getAttributeName()
+                );
             }
 
             ProductAttribute attributeToPersist;
+
             if (attributeRequest.getId() != null) {
-                // Update existing attribute
-                attributeToPersist = existingAttributesMap.get(attributeRequest.getId());
+
+                attributeToPersist =
+                    existingAttributesMap.get(
+                        attributeRequest.getId()
+                    );
+
                 if (attributeToPersist == null) {
-                    throw new ResourceNotFoundException("ProductAttribute", attributeRequest.getId());
+                    throw new ResourceNotFoundException(
+                        "ProductAttribute",
+                        attributeRequest.getId()
+                    );
                 }
-                productMapper.updateProductAttributeFromDto(attributeRequest, attributeToPersist);
+
+                productMapper.updateProductAttributeFromDto(
+                    attributeRequest,
+                    attributeToPersist
+                );
+
             } else {
-                // Add new attribute
+
                 attributeToPersist = new ProductAttribute();
-                attributeToPersist.setAttributeName(attributeRequest.getAttributeName());
-                attributeToPersist.setAttributeValue(attributeRequest.getAttributeValue());
+
+                attributeToPersist.setAttributeName(
+                    attributeRequest.getAttributeName()
+                );
+
+                attributeToPersist.setAttributeValue(
+                    attributeRequest.getAttributeValue()
+                );
             }
+
             attributeToPersist.setProduct(product);
-            product.getProductAttributes().add(attributeToPersist);
+
+            product.getProductAttributes()
+                .add(attributeToPersist);
         }
     }
 
     private void checkProductOwnership(Product product) {
 
-        Long currentUserId = SecurityUtils.getCurrentUserId();
+        Long currentUserId =
+            SecurityUtils.getCurrentUserId();
 
         if (currentUserId == null) {
-            throw new UnauthorizedException("Authentication required.");
+            throw new UnauthorizedException(
+                "Authentication required."
+            );
         }
 
         if (SecurityUtils.hasRole(UserRole.ADMIN)) {
             return;
         }
 
-        if (product.getSeller() == null ||
-            !product.getSeller().getId().equals(currentUserId)) {
+        if (product.getSeller() == null
+            || !product.getSeller()
+            .getId()
+            .equals(currentUserId)) {
 
-            throw new UnauthorizedException(
+            throw new ForbiddenException(
                 "You are not allowed to manage this product."
             );
         }
     }
 
-    private String generateUniqueSlug(String name, Long currentId) {
+    private String generateUniqueSlug(
+        String name,
+        Long currentId
+    ) {
 
         String baseSlug = slugify.slugify(name);
         String slug = baseSlug;
+
         int counter = 1;
 
         while (true) {
 
-            boolean exists = (currentId == null)
+            boolean exists = currentId == null
                 ? productRepository.existsBySlugIgnoreCase(slug)
                 : productRepository
-                .findBySlugIgnoreCaseAndIdNot(slug, currentId)
+                .findBySlugIgnoreCaseAndIdNot(
+                    slug,
+                    currentId
+                )
                 .isPresent();
 
             if (!exists) {
@@ -504,10 +771,13 @@ public class ProductServiceImpl implements ProductService {
 
     private User buildCurrentUserRef() {
 
-        Long currentUserId = SecurityUtils.getCurrentUserId();
+        Long currentUserId =
+            SecurityUtils.getCurrentUserId();
 
         if (currentUserId == null) {
-            throw new UnauthorizedException("Authentication required.");
+            throw new UnauthorizedException(
+                "Authentication required."
+            );
         }
 
         User user = new User();
