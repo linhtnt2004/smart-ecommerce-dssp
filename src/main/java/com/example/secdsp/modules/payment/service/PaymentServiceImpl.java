@@ -1,8 +1,6 @@
 package com.example.secdsp.modules.payment.service;
 
-import com.example.secdsp.common.exception.BusinessException;
-import com.example.secdsp.common.exception.ResourceNotFoundException;
-import com.example.secdsp.common.exception.UnauthorizedException;
+import com.example.secdsp.common.exception.*;
 import com.example.secdsp.common.util.SecurityUtils;
 import com.example.secdsp.config.VnPayProperties;
 import com.example.secdsp.modules.inventory.service.InventoryInternalService;
@@ -58,20 +56,20 @@ public class PaymentServiceImpl implements PaymentService {
     @Transactional(readOnly = true)
     public PaymentResponse getPaymentByOrderId(Long orderId) {
 
-        Long userId = SecurityUtils.getCurrentUserId();
-
-        if (userId == null) {
-            throw new UnauthorizedException("Authentication required.");
-        }
+        Long userId = requireUser();
 
         Payment payment = paymentRepository.findByOrder_Id(orderId)
             .orElseThrow(() ->
                              new ResourceNotFoundException("Payment", orderId));
 
-        if (!payment.getOrder().getUser().getId().equals(userId)
-            && !SecurityUtils.hasRole(UserRole.ADMIN)) {
+        boolean isOwner =
+            payment.getOrder().getUser().getId().equals(userId);
 
-            throw new UnauthorizedException(
+        boolean isAdmin =
+            SecurityUtils.hasRole(UserRole.ADMIN);
+
+        if (!isOwner && !isAdmin) {
+            throw new ForbiddenException(
                 "You are not allowed to view this payment."
             );
         }
@@ -91,17 +89,25 @@ public class PaymentServiceImpl implements PaymentService {
         Order order = getOrderOrThrow(orderId);
 
         if (!order.getUser().getId().equals(userId)) {
-            throw new UnauthorizedException("You cannot pay this order.");
+            throw new ForbiddenException(
+                "You cannot pay this order."
+            );
         }
 
         if (order.getStatus() != OrderStatus.PENDING) {
-            throw new BusinessException("Only pending orders can be paid.");
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Only pending orders can be paid."
+            );
         }
 
         Payment payment = getPaymentOrThrow(orderId);
 
         if (payment.getStatus() == PaymentStatus.SUCCESS) {
-            throw new BusinessException("Order already paid.");
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Order already paid."
+            );
         }
 
         PaymentGatewayRequest gatewayRequest =
@@ -116,11 +122,19 @@ public class PaymentServiceImpl implements PaymentService {
         PaymentGatewayResponse response;
 
         if (request.getPaymentMethod() == PaymentMethod.VNPAY) {
+
             response = vnPayService.createPayment(gatewayRequest);
+
         } else if (request.getPaymentMethod() == PaymentMethod.MOMO) {
+
             response = momoService.createPayment(gatewayRequest);
+
         } else {
-            throw new BusinessException("Unsupported payment method.");
+
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Unsupported payment method."
+            );
         }
 
         payment.setPaymentMethod(request.getPaymentMethod());
@@ -143,11 +157,7 @@ public class PaymentServiceImpl implements PaymentService {
     @Transactional(readOnly = true)
     public Page<PaymentResponse> getMyPayments(Pageable pageable) {
 
-        Long userId = SecurityUtils.getCurrentUserId();
-
-        if (userId == null) {
-            throw new UnauthorizedException("Authentication required.");
-        }
+        Long userId = requireUser();
 
         Page<Payment> payments =
             paymentRepository.findByOrder_User_Id(userId, pageable);
@@ -163,7 +173,7 @@ public class PaymentServiceImpl implements PaymentService {
     ) {
 
         if (!SecurityUtils.hasRole(UserRole.ADMIN)) {
-            throw new UnauthorizedException(
+            throw new ForbiddenException(
                 "Only admin can update payment status."
             );
         }
@@ -172,16 +182,17 @@ public class PaymentServiceImpl implements PaymentService {
             .orElseThrow(() ->
                              new ResourceNotFoundException("Payment", paymentId));
 
+        if (request.getTransactionId() != null
+            && !request.getTransactionId().equals(payment.getTransactionId())
+            && paymentRepository.existsByTransactionId(
+            request.getTransactionId())) {
+
+            throw new ResourceAlreadyExistsException(
+                "Transaction ID already exists."
+            );
+        }
+
         if (request.getTransactionId() != null) {
-
-            if (paymentRepository.existsByTransactionId(
-                request.getTransactionId())) {
-
-                throw new BusinessException(
-                    "Duplicate transaction ID."
-                );
-            }
-
             payment.setTransactionId(request.getTransactionId());
         }
 
@@ -205,7 +216,9 @@ public class PaymentServiceImpl implements PaymentService {
             Order order = payment.getOrder();
             order.setStatus(OrderStatus.CANCELLED);
 
-            List<OrderItem> items = orderItemRepository.findByOrder_Id(order.getId());
+            List<OrderItem> items =
+                orderItemRepository.findByOrder_Id(order.getId());
+
             for (OrderItem item : items) {
                 inventoryInternalService.releaseForCancel(
                     item.getProduct().getId(),
