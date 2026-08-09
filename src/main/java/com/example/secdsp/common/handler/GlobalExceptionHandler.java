@@ -2,6 +2,7 @@ package com.example.secdsp.common.handler;
 
 import com.example.secdsp.common.api.BaseResponse;
 import com.example.secdsp.common.exception.BusinessException;
+import com.example.secdsp.common.exception.EmailSendingException;
 import com.example.secdsp.common.exception.dto.FieldErrorResponse;
 import com.example.secdsp.common.exception.dto.ValidationErrorResponse;
 import jakarta.validation.ConstraintViolationException;
@@ -225,6 +226,24 @@ public class GlobalExceptionHandler {
 
         return buildErrorResponse(
             ex.getErrorCode().getHttpStatus(),
+            ex.getMessage()
+        );
+    }
+
+    /**
+     * =========================
+     * Email Exceptions
+     * =========================
+     */
+
+    @ExceptionHandler(EmailSendingException.class)
+    public ResponseEntity<BaseResponse<Void>> handleEmailSendingException(
+        EmailSendingException ex
+    ) {
+        log.error("Email sending failed", ex);
+
+        return buildErrorResponse(
+            HttpStatus.INTERNAL_SERVER_ERROR,
             ex.getMessage()
         );
     }

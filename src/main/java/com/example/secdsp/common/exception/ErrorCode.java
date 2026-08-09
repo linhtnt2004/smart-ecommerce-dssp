@@ -21,6 +21,9 @@ public enum ErrorCode {
     // ===== Business =====
     BUSINESS_ERROR(HttpStatus.BAD_REQUEST, "Business error"),
 
+    // ===== Rate Limit =====
+    TOO_MANY_REQUESTS(HttpStatus.TOO_MANY_REQUESTS, "Too many requests"),
+
     // ===== System =====
     INTERNAL_SERVER_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "Unexpected server error");
 

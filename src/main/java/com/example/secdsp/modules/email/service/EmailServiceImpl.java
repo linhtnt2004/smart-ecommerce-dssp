@@ -1,5 +1,6 @@
 package com.example.secdsp.modules.email.service;
 
+import com.example.secdsp.common.exception.EmailSendingException;
 import com.example.secdsp.config.MailProperties;
 import jakarta.mail.internet.MimeMessage;
 import lombok.RequiredArgsConstructor;
@@ -60,8 +61,11 @@ public class EmailServiceImpl implements EmailService {
 
         } catch (Exception e) {
             log.error("Error sending email to {}", toEmail, e);
-            throw new RuntimeException("Unable to send email at the moment");
-        }
+
+            throw new EmailSendingException(
+                "Unable to send email at the moment.",
+                e
+            );        }
     }
 
     private String buildOtpTemplate(String otp) {
