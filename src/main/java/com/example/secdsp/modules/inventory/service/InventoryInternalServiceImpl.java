@@ -1,6 +1,7 @@
 package com.example.secdsp.modules.inventory.service;
 
 import com.example.secdsp.common.exception.BusinessException;
+import com.example.secdsp.common.exception.ErrorCode;
 import com.example.secdsp.modules.inventory.entity.Inventory;
 import com.example.secdsp.modules.inventory.entity.InventoryLog;
 import com.example.secdsp.modules.inventory.entity.InventoryLogReason;
@@ -24,15 +25,33 @@ public class InventoryInternalServiceImpl implements InventoryInternalService {
     public void reserveForOrder(Long productId, int quantity) {
 
         if (quantity <= 0) {
-            throw new BusinessException("Quantity must be greater than 0.");
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Quantity must be greater than 0."
+            );
         }
 
         Inventory inventory = inventoryRepository
             .findByProduct_IdForUpdate(productId)
-            .orElseThrow(() -> new BusinessException("Inventory not found for product " + productId));
+            .orElseThrow(() ->
+                             new BusinessException(
+                                 ErrorCode.RESOURCE_NOT_FOUND,
+                                 "Inventory not found for product " + productId
+                             )
+            );
 
         if (inventory.getAvailableQuantity() < quantity) {
-            throw new BusinessException("Insufficient stock for product ID: " + productId);
+            log.warn(
+                "Insufficient stock for product {}. Available: {}, Requested: {}",
+                productId,
+                inventory.getAvailableQuantity(),
+                quantity
+            );
+
+            throw new BusinessException(
+                ErrorCode.BUSINESS_ERROR,
+                "Insufficient stock for product ID: " + productId
+            );
         }
 
         int previousAvailable = inventory.getAvailableQuantity();
@@ -49,7 +68,11 @@ public class InventoryInternalServiceImpl implements InventoryInternalService {
             InventoryLogReason.ORDER
         );
 
-        log.info("Reserved {} units for product {}", quantity, productId);
+        log.info(
+            "Reserved {} units for product {}",
+            quantity,
+            productId
+        );
     }
 
     @Override
@@ -57,18 +80,36 @@ public class InventoryInternalServiceImpl implements InventoryInternalService {
     public void releaseForCancel(Long productId, int quantity) {
 
         if (quantity <= 0) {
-            throw new BusinessException("Quantity must be greater than 0.");
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Quantity must be greater than 0."
+            );
         }
 
         Inventory inventory = inventoryRepository
             .findByProduct_IdForUpdate(productId)
-            .orElseThrow(() -> new BusinessException("Inventory not found for product " + productId));
+            .orElseThrow(() ->
+                             new BusinessException(
+                                 ErrorCode.RESOURCE_NOT_FOUND,
+                                 "Inventory not found for product " + productId
+                             )
+            );
 
         int previousAvailable = inventory.getAvailableQuantity();
         int previousReserved = inventory.getReservedQuantity();
 
         if (previousReserved < quantity) {
-            throw new BusinessException("Reserved quantity inconsistent.");
+            log.error(
+                "Reserved quantity inconsistent for product {}. Reserved: {}, Requested release: {}",
+                productId,
+                previousReserved,
+                quantity
+            );
+
+            throw new BusinessException(
+                ErrorCode.BUSINESS_ERROR,
+                "Reserved quantity is inconsistent for product ID: " + productId
+            );
         }
 
         inventory.setAvailableQuantity(previousAvailable + quantity);
@@ -82,7 +123,11 @@ public class InventoryInternalServiceImpl implements InventoryInternalService {
             InventoryLogReason.ORDER_CANCEL
         );
 
-        log.info("Released {} units for product {}", quantity, productId);
+        log.info(
+            "Released {} units for product {}",
+            quantity,
+            productId
+        );
     }
 
     private void insertLog(

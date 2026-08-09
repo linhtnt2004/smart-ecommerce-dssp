@@ -1,7 +1,9 @@
 package com.example.secdsp.modules.inventory.service;
 
 import com.example.secdsp.common.exception.BusinessException;
+import com.example.secdsp.common.exception.ErrorCode;
 import com.example.secdsp.common.exception.ResourceNotFoundException;
+import com.example.secdsp.common.exception.UnauthorizedException;
 import com.example.secdsp.common.util.SecurityUtils;
 import com.example.secdsp.modules.inventory.dto.internal.InventorySummaryInfo;
 import com.example.secdsp.modules.inventory.dto.request.UpdateInventoryRequest;
@@ -28,12 +30,12 @@ import java.util.List;
 @RequiredArgsConstructor
 public class InventoryServiceImpl implements InventoryService {
 
+    private static final int LOW_STOCK_THRESHOLD = 5;
+
     private final InventoryRepository inventoryRepository;
     private final InventoryLogRepository inventoryLogRepository;
     private final InventoryMapper inventoryMapper;
     private final ProductService productService;
-
-    private static final int LOW_STOCK_THRESHOLD = 5;
 
     @Override
     @Transactional(readOnly = true)
@@ -47,7 +49,8 @@ public class InventoryServiceImpl implements InventoryService {
                              new ResourceNotFoundException(
                                  "Inventory for product",
                                  productId
-                             ));
+                             )
+            );
 
         return buildResponse(inventory);
     }
@@ -59,32 +62,67 @@ public class InventoryServiceImpl implements InventoryService {
         UpdateInventoryRequest request
     ) {
 
-        log.info("Updating inventory for product {}", productId);
+        log.info(
+            "Updating inventory for product {}",
+            productId
+        );
 
         ProductInfo product =
             productService.getProductInfo(productId);
 
         Long currentUserId = SecurityUtils.getCurrentUserId();
 
-        if (!SecurityUtils.hasRole(UserRole.ADMIN)
-            && (product.sellerId() == null
-            || !product.sellerId().equals(currentUserId))) {
+        if (currentUserId == null) {
+            throw new UnauthorizedException();
+        }
+
+        boolean isAdmin = SecurityUtils.hasRole(UserRole.ADMIN);
+        boolean isSeller = product.sellerId() != null
+            && product.sellerId().equals(currentUserId);
+
+        if (!isAdmin && !isSeller) {
+
+            log.warn(
+                "User {} attempted to update inventory for product {} without permission",
+                currentUserId,
+                productId
+            );
 
             throw new BusinessException(
+                ErrorCode.ACCESS_DENIED,
                 "You do not have permission to manage the inventory for this product."
             );
         }
 
         Inventory inventory = inventoryRepository
             .findByProduct_IdForUpdate(productId)
-            .orElseThrow(() -> new ResourceNotFoundException("Inventory for product", productId));
+            .orElseThrow(() ->
+                             new ResourceNotFoundException(
+                                 "Inventory for product",
+                                 productId
+                             )
+            );
 
-        int previous = inventory.getAvailableQuantity();
-        int adjustment = request.getAdjustmentQuantity();
-        int newQuantity = previous + adjustment;
+        int previousQuantity =
+            inventory.getAvailableQuantity();
+
+        int adjustment =
+            request.getAdjustmentQuantity();
+
+        int newQuantity =
+            previousQuantity + adjustment;
 
         if (newQuantity < 0) {
+
+            log.warn(
+                "Invalid inventory adjustment for product {}. Previous: {}, Adjustment: {}",
+                productId,
+                previousQuantity,
+                adjustment
+            );
+
             throw new BusinessException(
+                ErrorCode.BUSINESS_ERROR,
                 "Inventory quantity cannot be negative."
             );
         }
@@ -94,7 +132,7 @@ public class InventoryServiceImpl implements InventoryService {
         InventoryLog logEntry = InventoryLog.builder()
             .product(inventory.getProduct())
             .changeAmount(adjustment)
-            .previousQuantity(previous)
+            .previousQuantity(previousQuantity)
             .currentQuantity(newQuantity)
             .reason(request.getReason())
             .updatedBy(buildCurrentUserRef())
@@ -102,7 +140,13 @@ public class InventoryServiceImpl implements InventoryService {
 
         inventoryLogRepository.save(logEntry);
 
-        log.info("Inventory updated successfully for product {}", productId);
+        log.info(
+            "Inventory updated successfully for product {}. Previous: {}, Adjustment: {}, Current: {}",
+            productId,
+            previousQuantity,
+            adjustment,
+            newQuantity
+        );
 
         return buildResponse(inventory);
     }
@@ -112,12 +156,10 @@ public class InventoryServiceImpl implements InventoryService {
     public InventorySummaryInfo getInventorySummary(Long sellerId) {
 
         long lowStock =
-            inventoryRepository
-                .countLowStockBySeller(sellerId);
+            inventoryRepository.countLowStockBySeller(sellerId);
 
         long outOfStock =
-            inventoryRepository
-                .countOutOfStockBySeller(sellerId);
+            inventoryRepository.countOutOfStockBySeller(sellerId);
 
         return InventorySummaryInfo.builder()
             .lowStockProducts(lowStock)
@@ -127,7 +169,9 @@ public class InventoryServiceImpl implements InventoryService {
 
     @Override
     @Transactional(readOnly = true)
-    public List<LowStockProductInfo> getLowStockProducts(Long sellerId) {
+    public List<LowStockProductInfo> getLowStockProducts(
+        Long sellerId
+    ) {
 
         return inventoryRepository
             .findLowStockProductsBySeller(sellerId)
@@ -141,22 +185,32 @@ public class InventoryServiceImpl implements InventoryService {
             .toList();
     }
 
-    private InventoryResponse buildResponse(Inventory inventory) {
+    private InventoryResponse buildResponse(
+        Inventory inventory
+    ) {
 
         InventoryResponse base =
             inventoryMapper.toResponse(inventory);
 
-        int currentStock = inventory.getAvailableQuantity()
-            + inventory.getReservedQuantity();
+        int currentStock =
+            inventory.getAvailableQuantity()
+                + inventory.getReservedQuantity();
 
         return InventoryResponse.builder()
             .productId(base.getProductId())
             .productName(base.getProductName())
-            .availableQuantity(inventory.getAvailableQuantity())
-            .reservedQuantity(inventory.getReservedQuantity())
+            .availableQuantity(
+                inventory.getAvailableQuantity()
+            )
+            .reservedQuantity(
+                inventory.getReservedQuantity()
+            )
             .currentStock(currentStock)
-            .inventoryStatus(calculateStatus(
-                inventory.getAvailableQuantity()))
+            .inventoryStatus(
+                calculateStatus(
+                    inventory.getAvailableQuantity()
+                )
+            )
             .build();
     }
 
@@ -175,14 +229,16 @@ public class InventoryServiceImpl implements InventoryService {
 
     private User buildCurrentUserRef() {
 
-        Long currentUserId = SecurityUtils.getCurrentUserId();
+        Long currentUserId =
+            SecurityUtils.getCurrentUserId();
 
         if (currentUserId == null) {
-            throw new BusinessException("Authentication required.");
+            throw new UnauthorizedException();
         }
 
         User user = new User();
         user.setId(currentUserId);
+
         return user;
     }
 }
