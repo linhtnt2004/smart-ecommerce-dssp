@@ -1,11 +1,12 @@
 package com.example.secdsp.modules.email.service;
 
 import com.example.secdsp.common.exception.BusinessException;
+import com.example.secdsp.common.exception.ErrorCode;
+import com.example.secdsp.common.exception.ResourceNotFoundException;
 import com.example.secdsp.config.MailProperties;
 import com.example.secdsp.modules.email.entity.EmailOtp;
 import com.example.secdsp.modules.email.repository.EmailOtpRepository;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
@@ -24,12 +25,15 @@ public class OtpServiceImpl implements OtpService {
         String otp = generateRandomOtp();
 
         EmailOtp emailOtp = new EmailOtp();
+
         emailOtp.setEmail(email);
         emailOtp.setOtp(otp);
         emailOtp.setExpiryTime(
             OffsetDateTime.now()
-                .plusMinutes(mailProperties.getOtpExpirationMinutes()));
+                .plusMinutes(mailProperties.getOtpExpirationMinutes())
+        );
         emailOtp.setUsed(false);
+        emailOtp.setVerified(false);
         emailOtp.setCreatedAt(OffsetDateTime.now());
         emailOtp.setResendCount(0);
 
@@ -44,34 +48,42 @@ public class OtpServiceImpl implements OtpService {
         EmailOtp latestOtp = emailOtpRepository
             .findTopByEmailOrderByIdDesc(email)
             .orElseThrow(() ->
-                             new BusinessException("OTP not found", HttpStatus.BAD_REQUEST));
+                             new ResourceNotFoundException("OTP", email)
+            );
+
+        OffsetDateTime now = OffsetDateTime.now();
 
         if (latestOtp.getCreatedAt()
             .plusSeconds(mailProperties.getResendCooldownSeconds())
-            .isAfter(OffsetDateTime.now())) {
+            .isAfter(now)) {
 
             throw new BusinessException(
-                "Please wait before requesting another OTP",
-                HttpStatus.TOO_MANY_REQUESTS
+                ErrorCode.TOO_MANY_REQUESTS,
+                "Please wait before requesting another OTP."
             );
         }
 
-        if (latestOtp.getResendCount() >= mailProperties.getMaxResendAttempts()) {
+        if (latestOtp.getResendCount()
+            >= mailProperties.getMaxResendAttempts()) {
+
             throw new BusinessException(
-                "Maximum resend attempts exceeded",
-                HttpStatus.TOO_MANY_REQUESTS
+                ErrorCode.TOO_MANY_REQUESTS,
+                "Maximum OTP resend attempts exceeded."
             );
         }
 
-        // Generate new OTP
         String newOtp = generateRandomOtp();
 
         latestOtp.setOtp(newOtp);
         latestOtp.setExpiryTime(
-            OffsetDateTime.now()
-                .plusMinutes(mailProperties.getOtpExpirationMinutes()));
-        latestOtp.setCreatedAt(OffsetDateTime.now());
-        latestOtp.setResendCount(latestOtp.getResendCount() + 1);
+            now.plusMinutes(
+                mailProperties.getOtpExpirationMinutes()
+            )
+        );
+        latestOtp.setCreatedAt(now);
+        latestOtp.setResendCount(
+            latestOtp.getResendCount() + 1
+        );
         latestOtp.setUsed(false);
         latestOtp.setVerified(false);
 
@@ -86,27 +98,43 @@ public class OtpServiceImpl implements OtpService {
         EmailOtp emailOtp = emailOtpRepository
             .findTopByEmailOrderByIdDesc(email)
             .orElseThrow(() ->
-                             new BusinessException("OTP not found", HttpStatus.BAD_REQUEST));
+                             new ResourceNotFoundException("OTP", email)
+            );
+
+        OffsetDateTime now = OffsetDateTime.now();
 
         if (emailOtp.isUsed()) {
-            throw new BusinessException("OTP already used", HttpStatus.BAD_REQUEST);
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "OTP has already been used."
+            );
         }
 
-        if (emailOtp.getExpiryTime().isBefore(OffsetDateTime.now())) {
-            throw new BusinessException("OTP expired", HttpStatus.BAD_REQUEST);
+        if (emailOtp.getExpiryTime().isBefore(now)) {
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "OTP has expired."
+            );
         }
 
         if (!emailOtp.getOtp().equals(otp)) {
-            throw new BusinessException("Invalid OTP", HttpStatus.BAD_REQUEST);
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Invalid OTP."
+            );
         }
 
         emailOtp.setUsed(true);
         emailOtp.setVerified(true);
+
         emailOtpRepository.save(emailOtp);
     }
 
     private String generateRandomOtp() {
+
         return String.valueOf(
-            ThreadLocalRandom.current().nextInt(100000, 999999));
+            ThreadLocalRandom.current()
+                .nextInt(100000, 1000000)
+        );
     }
 }
