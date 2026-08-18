@@ -5,6 +5,8 @@ import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
 import jakarta.annotation.PreDestroy;
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -41,14 +43,71 @@ public class LightGbmOnnxDemandPredictor {
     );
 
     private final Path modelDirectory;
+    private final boolean modelRequired;
     private volatile OrtEnvironment environment;
     private volatile OrtSession session;
-    private volatile boolean modelFailed;
 
+    public LightGbmOnnxDemandPredictor(String modelDirectory) {
+        this(modelDirectory, false);
+    }
+
+    @Autowired
     public LightGbmOnnxDemandPredictor(
-        @Value("${app.dss.model-dir:models/demand}") String modelDirectory
+        @Value("${app.dss.model-dir:models/demand}") String modelDirectory,
+        @Value("${app.dss.model-required:false}") boolean modelRequired
     ) {
         this.modelDirectory = Path.of(modelDirectory).toAbsolutePath().normalize();
+        this.modelRequired = modelRequired;
+    }
+
+    /**
+     * Validate the artifact and perform one real inference during startup.
+     * Production must fail deployment if the model cannot run; otherwise the
+     * application would appear healthy while silently serving baseline output.
+     */
+    @PostConstruct
+    void validateModelOnStartup() {
+        Path path = modelPath();
+        if (!Files.isRegularFile(path)) {
+            String message = "Demand model file not found: " + path;
+            if (modelRequired) {
+                throw new IllegalStateException(message);
+            }
+            log.warn(message + ". Baseline fallback remains enabled.");
+            return;
+        }
+
+        try {
+            OrtSession loaded = sessionFor();
+            if (loaded.getInputNames().isEmpty() || loaded.getOutputNames().isEmpty()) {
+                throw new IllegalStateException("ONNX model has no input or output node");
+            }
+
+            OptionalDouble smoke = runPrediction(
+                0L,
+                LocalDate.now(),
+                List.of(0L, 0L, 0L, 0L, 0L, 0L, 0L),
+                7
+            );
+            if (smoke.isEmpty()) {
+                throw new IllegalStateException("ONNX smoke inference returned no finite value");
+            }
+
+            log.info(
+                "Demand ONNX model ready: path={}, bytes={}, inputs={}, outputs={}, smokePrediction={}",
+                path,
+                Files.size(path),
+                loaded.getInputNames(),
+                loaded.getOutputNames(),
+                smoke.getAsDouble()
+            );
+        } catch (Exception | LinkageError exception) {
+            String message = "Demand ONNX model failed startup validation: " + path;
+            if (modelRequired) {
+                throw new IllegalStateException(message, exception);
+            }
+            log.warn(message + ". Baseline fallback remains enabled.", exception);
+        }
     }
 
     public boolean isModelAvailable(Long productId) {
@@ -61,37 +120,48 @@ public class LightGbmOnnxDemandPredictor {
         List<Long> history,
         int historyDays
     ) {
-        if (!isModelAvailable(productId) || modelFailed) {
+        if (!isModelAvailable(productId)) {
             return OptionalDouble.empty();
         }
 
         try {
-            OrtSession session = sessionFor();
-            String inputName = session.getInputNames().iterator().next();
-            float[] features = buildFeatures(targetDate, history, historyDays);
-            OrtEnvironment runtimeEnvironment = environment();
-
-            try (
-                OnnxTensor input = OnnxTensor.createTensor(
-                    runtimeEnvironment,
-                    new float[][] { features }
-                );
-                OrtSession.Result result = session.run(Map.of(inputName, input))
-            ) {
-                double prediction = extractPrediction(result.get(0).getValue());
-                if (!Double.isFinite(prediction)) {
-                    return OptionalDouble.empty();
-                }
-                return OptionalDouble.of(Math.max(0.0, prediction));
-            }
+            return runPrediction(productId, targetDate, history, historyDays);
         } catch (Exception | LinkageError exception) {
-            modelFailed = true;
             log.warn(
-                "Cannot run global LightGBM ONNX model for product {}. Falling back to baseline.",
+                "Cannot run global LightGBM ONNX model for product {} at runtime. Falling back for this forecast point.",
                 productId,
                 exception
             );
             return OptionalDouble.empty();
+        }
+    }
+
+    private OptionalDouble runPrediction(
+        Long productId,
+        LocalDate targetDate,
+        List<Long> history,
+        int historyDays
+    ) throws Exception {
+        OrtSession loaded = sessionFor();
+        String inputName = loaded.getInputNames().iterator().next();
+        float[] features = buildFeatures(targetDate, history, historyDays);
+        OrtEnvironment runtimeEnvironment = environment();
+
+        try (
+            OnnxTensor input = OnnxTensor.createTensor(
+                runtimeEnvironment,
+                new float[][] { features }
+            );
+            OrtSession.Result result = loaded.run(Map.of(inputName, input))
+        ) {
+            if (result.size() == 0) {
+                return OptionalDouble.empty();
+            }
+            double prediction = extractPrediction(result.get(0).getValue());
+            if (!Double.isFinite(prediction)) {
+                return OptionalDouble.empty();
+            }
+            return OptionalDouble.of(Math.max(0.0, prediction));
         }
     }
 

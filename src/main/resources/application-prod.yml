@@ -112,6 +112,11 @@ logging:
 
 # Absolute URL for /uploads when Cloudinary is missing/misconfigured
 app:
+  dss:
+    # The model is copied to this absolute path by Dockerfile.
+    model-dir: ${DSS_MODEL_DIR:/app/models/demand}
+    # Do not silently serve baseline forecasts in production.
+    model-required: ${DSS_MODEL_REQUIRED:true}
   cloudinary:
     cloud-name: ${CLOUDINARY_CLOUD_NAME:}
     api-key: ${CLOUDINARY_API_KEY:}
