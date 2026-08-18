@@ -65,6 +65,56 @@ public class SellerDashboardServiceImpl implements SellerDashboardService {
             .build();
     }
 
+    /** Actionable DSS-style tips from live dashboard metrics (not generic placeholders). */
+    private List<String> buildRecommendations(
+        InventorySummary inventory,
+        List<LowStockProductResponse> lowStock,
+        SellerRatingSummary rating,
+        OrderSummary orders
+    ) {
+        List<String> tips = new ArrayList<>();
+
+        if (inventory != null && inventory.outOfStockProducts() > 0) {
+            tips.add(
+                "Có " + inventory.outOfStockProducts()
+                    + " sản phẩm hết hàng — mở DSS → Khuyến nghị tồn kho để lập lệnh nhập."
+            );
+        }
+        if (lowStock != null && !lowStock.isEmpty()) {
+            String names = lowStock.stream()
+                .limit(2)
+                .map(LowStockProductResponse::productName)
+                .reduce((a, b) -> a + ", " + b)
+                .orElse("");
+            tips.add(
+                "Tồn thấp: " + names
+                    + (lowStock.size() > 2 ? " (+" + (lowStock.size() - 2) + ")" : "")
+                    + ". Chạy dự báo nhu cầu trước khi nhập."
+            );
+        }
+        if (orders != null && orders.pending() > 0) {
+            tips.add(
+                "Có " + orders.pending()
+                    + " đơn chờ xử lý — ưu tiên xác nhận để tránh hủy đơn."
+            );
+        }
+        if (rating != null && rating.warning() != null && !rating.warning().isBlank()) {
+            tips.add(rating.warning() + " Xem đánh giá gần đây và cải thiện phản hồi.");
+        }
+        if (orders != null && orders.shipping() > 5) {
+            tips.add(
+                "Có " + orders.shipping()
+                    + " đơn đang giao — theo dõi tracking để giảm khiếu nại giao hàng."
+            );
+        }
+        if (tips.isEmpty()) {
+            tips.add(
+                "Shop đang ổn định. Dùng DSS → Gợi ý giá nâng cao / Hiệu quả đơn hàng để tối ưu biên lợi nhuận."
+            );
+        }
+        return tips.stream().limit(5).toList();
+    }
+
     // ==============================
     // RULE ENGINE: RECOMMENDATIONS
     // ==============================
@@ -241,7 +291,10 @@ public class SellerDashboardServiceImpl implements SellerDashboardService {
     }
 
     private SellerRatingSummary buildRatingSection(Long sellerId) {
-        Object[] summary = reviewRepository.getSellerRatingSummary(sellerId);
+        List<Object[]> summaryRows = reviewRepository.getSellerRatingSummary(sellerId);
+        Object[] summary = summaryRows == null || summaryRows.isEmpty()
+            ? new Object[] { null, 0L }
+            : summaryRows.get(0);
 
         double avg = toDouble(summary != null && summary.length > 0 ? summary[0] : null);
         long total = toLong(summary != null && summary.length > 1 ? summary[1] : null);

@@ -5,10 +5,10 @@ import com.example.secdsp.common.exception.UnauthorizedException;
 import com.example.secdsp.common.util.SecurityUtils;
 import com.example.secdsp.config.PowerBiProperties;
 import com.example.secdsp.modules.ai.service.HuggingFaceChatService;
+import com.example.secdsp.modules.dss.dto.internal.DemandForecastProductView;
 import com.example.secdsp.modules.dss.dto.DemandForecastResponse;
 import com.example.secdsp.modules.dss.dto.DssInsightPlanResponse;
 import com.example.secdsp.modules.dss.dto.InventoryRecommendationResponse;
-import com.example.secdsp.modules.dss.dto.PriceRecommendationResponse;
 import com.example.secdsp.modules.inventory.entity.Inventory;
 import com.example.secdsp.modules.inventory.repository.InventoryRepository;
 import com.example.secdsp.modules.order.repository.OrderItemRepository;
@@ -21,8 +21,6 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -40,6 +38,7 @@ public class DssAnalyticsService {
     private final InventoryRepository inventoryRepository;
     private final HuggingFaceChatService huggingFaceChatService;
     private final PowerBiProperties powerBiProperties;
+    private final DemandForecastEngine demandForecastEngine;
 
     private Long requireUserId() {
         Long id = SecurityUtils.getCurrentUserId();
@@ -64,128 +63,31 @@ public class DssAnalyticsService {
     public DemandForecastResponse forecastDemand(Long productId, int historyDays, int forecastDays) {
         Long sellerId = requireUserId();
         Product product = requireSellerProduct(productId, sellerId);
-
-        int hist = clamp(historyDays, 7, 180);
-        int forecast = clamp(forecastDays, 7, 90);
-
-        List<Object[]> rows = orderItemRepository.findDailySoldQuantity(sellerId, productId, hist);
-        List<Map<String, Object>> historical = new ArrayList<>();
-        double sum = 0;
-        int dayIdx = 1;
-        for (Object[] row : rows) {
-            long qty = ((Number) row[1]).longValue();
-            sum += qty;
-            Map<String, Object> point = new LinkedHashMap<>();
-            point.put("day", dayIdx++);
-            point.put("qty", qty);
-            point.put("date", String.valueOf(row[0]));
-            historical.add(point);
-        }
-
-        if (historical.size() < 3) {
-            return DemandForecastResponse.builder()
-                .productId(productId)
-                .productName(product.getName())
-                .historicalDays(hist)
-                .forecastDays(forecast)
-                .averageDailyDemand(0)
-                .predictedDemand(0)
-                .method("moving_average")
-                .insufficientData(true)
-                .historicalSales(historical)
-                .forecastSales(List.of())
-                .generatedAt(now())
-                .build();
-        }
-
-        double avg = sum / historical.size();
-        long predicted = Math.round(avg * forecast);
-
-        List<Map<String, Object>> forecastSeries = new ArrayList<>();
-        Map<String, Object> start = new LinkedHashMap<>();
-        start.put("day", historical.size());
-        start.put("qty", ((Number) historical.get(historical.size() - 1).get("qty")).longValue());
-        forecastSeries.add(start);
-        Map<String, Object> end = new LinkedHashMap<>();
-        end.put("day", historical.size() + forecast);
-        end.put("qty", Math.round(avg));
-        forecastSeries.add(end);
+        DemandForecastProductView productView = new DemandForecastProductView(
+            product.getId(),
+            product.getSeller() != null ? product.getSeller().getId() : sellerId,
+            product.getName(),
+            product.getPrice()
+        );
+        var forecast = demandForecastEngine.forecast(
+            productView,
+            historyDays,
+            forecastDays
+        );
 
         return DemandForecastResponse.builder()
-            .productId(productId)
-            .productName(product.getName())
-            .historicalDays(hist)
-            .forecastDays(forecast)
-            .averageDailyDemand(round1(avg))
-            .predictedDemand(predicted)
-            .method("moving_average")
-            .insufficientData(false)
-            .historicalSales(historical)
-            .forecastSales(forecastSeries)
-            .generatedAt(now())
-            .build();
-    }
-
-    @Transactional(readOnly = true)
-    public PriceRecommendationResponse recommendPrice(Long productId, int lookbackDays) {
-        Long sellerId = requireUserId();
-        Product product = requireSellerProduct(productId, sellerId);
-        int days = clamp(lookbackDays, 7, 90);
-
-        List<Object[]> stats = orderItemRepository.findProductSalesStats(sellerId, days);
-        long demand = 0;
-        BigDecimal avgSoldPrice = product.getPrice();
-        for (Object[] row : stats) {
-            if (((Number) row[0]).longValue() == productId) {
-                demand = ((Number) row[2]).longValue();
-                avgSoldPrice = (BigDecimal) row[4];
-                break;
-            }
-        }
-        if (demand <= 0) {
-            demand = 30;
-        }
-
-        BigDecimal current = product.getPrice() != null ? product.getPrice() : avgSoldPrice;
-        double elasticity = -1.15;
-        double changePct = demand < 20 ? -5 : 5;
-        BigDecimal recommended = current.multiply(BigDecimal.valueOf(1 + changePct / 100.0))
-            .setScale(0, RoundingMode.HALF_UP);
-        long predictedDemand = Math.max(1, Math.round(demand * (1 + elasticity * (changePct / 100.0))));
-        BigDecimal expectedRevenue = recommended.multiply(BigDecimal.valueOf(predictedDemand));
-
-        String action = changePct > 0 ? "increase" : changePct < 0 ? "decrease" : "keep";
-        String insight = changePct > 0
-            ? "Nhu cau on dinh — co the tang gia nhe de cai thien doanh thu."
-            : "Nhu cau thap — can nhac giam gia de day doanh so.";
-
-        List<Map<String, Object>> chart = new ArrayList<>();
-        for (int i = 9; i >= 0; i--) {
-            Map<String, Object> p = new LinkedHashMap<>();
-            p.put("label", "D-" + i);
-            double wobble = 1 + ((i % 4) - 1.5) * 0.02;
-            BigDecimal price = current.multiply(BigDecimal.valueOf(wobble)).setScale(0, RoundingMode.HALF_UP);
-            long qty = Math.max(1, Math.round(demand / 10.0 * (1.1 - (wobble - 1) * 1.2)));
-            p.put("averagePrice", price);
-            p.put("quantitySold", qty);
-            chart.add(p);
-        }
-
-        return PriceRecommendationResponse.builder()
-            .productId(productId)
-            .productName(product.getName())
-            .currentPrice(current)
-            .recommendedPrice(recommended)
-            .priceChangePct(changePct)
-            .elasticity(elasticity)
-            .currentDemand(demand)
-            .predictedDemand(predictedDemand)
-            .expectedRevenue(expectedRevenue)
-            .action(action)
-            .message(insight)
-            .insight(insight)
-            .chart(chart)
-            .generatedAt(now())
+            .productId(forecast.productId())
+            .productName(forecast.productName())
+            .historicalDays(forecast.historicalDays())
+            .forecastDays(forecast.forecastDays())
+            .averageDailyDemand(forecast.averageDailyDemand())
+            .predictedDemand(forecast.predictedDemand())
+            .method(forecast.method())
+            .insufficientData(forecast.insufficientData())
+            .historicalSales(forecast.historicalSales())
+            .forecastSales(forecast.forecastSales())
+            .featureSnapshot(forecast.featureSnapshot())
+            .generatedAt(forecast.generatedAt())
             .build();
     }
 
@@ -370,7 +272,7 @@ public class DssAnalyticsService {
                     .append("đ\n");
             }
         }
-        sb.append("- Gợi ý module DSS nên nhắc: dự báo nhu cầu, gợi ý giá, what-if giảm giá, khuyến nghị tồn kho.\n");
+        sb.append("- Gợi ý module DSS nên nhắc: dự báo LightGBM, gợi ý giá nâng cao, hiệu quả đơn hàng, khuyến nghị tồn kho.\n");
         return sb.toString();
     }
 
