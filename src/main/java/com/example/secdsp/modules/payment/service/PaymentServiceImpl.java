@@ -4,6 +4,7 @@ import com.example.secdsp.common.exception.BusinessException;
 import com.example.secdsp.common.exception.ResourceNotFoundException;
 import com.example.secdsp.common.exception.UnauthorizedException;
 import com.example.secdsp.common.util.SecurityUtils;
+import com.example.secdsp.config.MoMoProperties;
 import com.example.secdsp.config.VnPayProperties;
 import com.example.secdsp.modules.inventory.service.InventoryInternalService;
 import com.example.secdsp.modules.order.dto.internal.MonthlyRevenueInfo;
@@ -14,6 +15,7 @@ import com.example.secdsp.modules.order.entity.*;
 import com.example.secdsp.modules.order.repository.OrderItemRepository;
 import com.example.secdsp.modules.order.repository.OrderRepository;
 import com.example.secdsp.modules.order.repository.OrderTrackingRepository;
+import com.example.secdsp.modules.order.service.OrderNotificationService;
 import com.example.secdsp.modules.payment.dto.request.PaymentGatewayRequest;
 import com.example.secdsp.modules.payment.dto.request.UpdatePaymentStatusRequest;
 import com.example.secdsp.modules.payment.dto.response.PaymentGatewayResponse;
@@ -50,9 +52,11 @@ public class PaymentServiceImpl implements PaymentService {
     private final OrderTrackingRepository orderTrackingRepository;
     private final PaymentMapper paymentMapper;
     private final InventoryInternalService inventoryInternalService;
+    private final OrderNotificationService orderNotificationService;
     private final VnPayService vnPayService;
     private final MoMoService momoService;
     private final VnPayProperties vnPayProperties;
+    private final MoMoProperties moMoProperties;
 
     @Override
     @Transactional(readOnly = true)
@@ -104,21 +108,55 @@ public class PaymentServiceImpl implements PaymentService {
             throw new BusinessException("Order already paid.");
         }
 
-        PaymentGatewayRequest gatewayRequest =
-            PaymentGatewayRequest.builder()
+        // COD: pay on delivery - no gateway redirect, keep PENDING
+        if (request.getPaymentMethod() == PaymentMethod.COD) {
+            payment.setPaymentMethod(PaymentMethod.COD);
+            payment.setGatewayName("COD");
+            payment.setStatus(PaymentStatus.PENDING);
+            payment.setTransactionId(null);
+
+            return PaymentResponse.builder()
+                .id(payment.getId())
                 .orderId(orderId)
-                .amount(order.getTotalAmount())
-                .orderInfo("Payment for Order #" + orderId)
-                .returnUrl(vnPayProperties.getReturnUrl())
-                .notifyUrl(vnPayProperties.getIpnUrl())
+                .paymentMethod(payment.getPaymentMethod())
+                .amount(payment.getAmount())
+                .status(payment.getStatus())
+                .transactionId(payment.getTransactionId())
+                .currency(payment.getCurrency())
+                .redirectUrl(null)
                 .build();
+        }
+
+        if (request.getPaymentMethod() == PaymentMethod.MOMO_QR) {
+            throw new BusinessException(
+                "MoMo chuyen khoan shop khong dung cong thanh toan. Xem huong dan tren trang don hang."
+            );
+        }
 
         PaymentGatewayResponse response;
 
         if (request.getPaymentMethod() == PaymentMethod.VNPAY) {
+            PaymentGatewayRequest gatewayRequest =
+                PaymentGatewayRequest.builder()
+                    .orderId(orderId)
+                    .amount(order.getTotalAmount())
+                    .orderInfo("Thanh toan don hang " + orderId)
+                    .returnUrl(vnPayProperties.getReturnUrl())
+                    .notifyUrl(vnPayProperties.getIpnUrl())
+                    .build();
             response = vnPayService.createPayment(gatewayRequest);
+            payment.setGatewayName("VNPAY");
         } else if (request.getPaymentMethod() == PaymentMethod.MOMO) {
+            PaymentGatewayRequest gatewayRequest =
+                PaymentGatewayRequest.builder()
+                    .orderId(orderId)
+                    .amount(order.getTotalAmount())
+                    .orderInfo("Payment for Order #" + orderId)
+                    .returnUrl(moMoProperties.getReturnUrl())
+                    .notifyUrl(moMoProperties.getNotifyUrl())
+                    .build();
             response = momoService.createPayment(gatewayRequest);
+            payment.setGatewayName("MOMO");
         } else {
             throw new BusinessException("Unsupported payment method.");
         }
@@ -199,6 +237,8 @@ public class PaymentServiceImpl implements PaymentService {
                 order,
                 OrderTrackingEvent.PAYMENT_SUCCESS
             );
+            orderNotificationService.notifyStatusChanged(order, OrderStatus.PAID);
+            commitInventoryForPaidOrder(order);
 
         } else if (request.getStatus() == PaymentStatus.FAILED) {
 
@@ -217,6 +257,7 @@ public class PaymentServiceImpl implements PaymentService {
                 order,
                 OrderTrackingEvent.PAYMENT_FAILED
             );
+            orderNotificationService.notifyCancelled(order, "Thanh toán thất bại — đơn đã hủy.");
         }
 
         return paymentMapper.toResponse(payment);
@@ -328,6 +369,8 @@ public class PaymentServiceImpl implements PaymentService {
             if (order.getStatus() != OrderStatus.PAID) {
                 order.setStatus(OrderStatus.PAID);
                 insertTracking(order, OrderTrackingEvent.PAYMENT_SUCCESS);
+                orderNotificationService.notifyStatusChanged(order, OrderStatus.PAID);
+                commitInventoryForPaidOrder(order);
             }
 
         } else if (status == PaymentStatus.FAILED) {
@@ -348,7 +391,17 @@ public class PaymentServiceImpl implements PaymentService {
                 }
 
                 insertTracking(order, OrderTrackingEvent.PAYMENT_FAILED);
+                orderNotificationService.notifyCancelled(order, "Thanh toán thất bại — đơn đã hủy.");
             }
+        }
+    }
+
+    private void commitInventoryForPaidOrder(Order order) {
+        for (OrderItem item : orderItemRepository.findByOrder_Id(order.getId())) {
+            inventoryInternalService.commitReservedForPaidOrder(
+                item.getProduct().getId(),
+                item.getQuantity()
+            );
         }
     }
 
@@ -362,10 +415,18 @@ public class PaymentServiceImpl implements PaymentService {
         tracking.setEvent(event);
 
         Long currentUserId = SecurityUtils.getCurrentUserId();
+        // Gateway callbacks (VNPay return/IPN) have no JWT — use buyer as actor
+        // (updated_by is NOT NULL + FK users). Never use 0L.
+        Long actorId = currentUserId;
+        if (actorId == null && order.getUser() != null) {
+            actorId = order.getUser().getId();
+        }
+        if (actorId == null) {
+            throw new BusinessException("Cannot record order tracking without an actor user.");
+        }
 
         User actor = new User();
-        actor.setId(currentUserId != null ? currentUserId : 0L);
-
+        actor.setId(actorId);
         tracking.setUpdatedBy(actor);
 
         orderTrackingRepository.save(tracking);

@@ -85,7 +85,9 @@ public class AuthController {
         authService.register(request);
 
         return ResponseEntity.status(HttpStatus.CREATED)
-            .body(BaseResponse.success("Registration successful"));
+            .body(BaseResponse.success(
+                "Registration successful. Please verify OTP sent to your email."
+            ));
     }
 
     @Operation(
@@ -108,6 +110,17 @@ public class AuthController {
         authService.resendOtp(email);
 
         return ResponseEntity.ok(BaseResponse.success("OTP resent successfully"));
+    }
+
+    @PostMapping("/verify-email")
+    public ResponseEntity<BaseResponse<Void>> verifyEmail(
+        @Valid @RequestBody VerifyOtpRequest request) {
+
+        authService.verifyEmail(request);
+
+        return ResponseEntity.ok(
+            BaseResponse.success("Email verified successfully. You can log in now.")
+        );
     }
 
     @Operation(

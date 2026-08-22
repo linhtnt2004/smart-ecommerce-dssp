@@ -5,6 +5,8 @@ import com.example.secdsp.modules.user.entity.User;
 import jakarta.persistence.*;
 import lombok.*;
 import lombok.experimental.FieldDefaults;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 
@@ -36,7 +38,8 @@ public class InventoryLog {
     Integer currentQuantity;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "reason", nullable = false)
+    @JdbcTypeCode(SqlTypes.NAMED_ENUM)
+    @Column(name = "reason", nullable = false, columnDefinition = "inventory_log_reason")
     InventoryLogReason reason;
 
     @ManyToOne(fetch = FetchType.LAZY)
@@ -48,6 +51,8 @@ public class InventoryLog {
 
     @PrePersist
     protected void onCreate() {
-        this.createdAt = OffsetDateTime.now();
+        if (createdAt == null) {
+            createdAt = OffsetDateTime.now();
+        }
     }
 }

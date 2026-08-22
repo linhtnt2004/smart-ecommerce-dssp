@@ -14,6 +14,9 @@ import java.math.BigDecimal;
 @Schema(description = "Shopping cart item")
 public class CartItemResponse {
 
+    @Schema(description = "Cart item identifier", example = "1")
+    Long id;
+
     @Schema(
         description = "Product identifier",
         example = "101"
@@ -25,6 +28,9 @@ public class CartItemResponse {
         example = "Nike Air Force 1"
     )
     String productName;
+
+    @Schema(description = "Primary product image — same source as shop listing")
+    String productImageUrl;
 
     @Schema(
         description = "Unit price",

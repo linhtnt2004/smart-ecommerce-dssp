@@ -1,11 +1,16 @@
 package com.example.secdsp.modules.order.repository;
 
 import com.example.secdsp.modules.order.entity.Order;
+import com.example.secdsp.modules.order.entity.OrderStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Optional;
 
 public interface OrderRepository
@@ -16,4 +21,51 @@ public interface OrderRepository
 
     @EntityGraph(attributePaths = {"items"})
     Page<Order> findByUser_Id(Long userId, Pageable pageable);
+
+    /**
+     * Prefer EXISTS over DISTINCT + bag EntityGraph: the old pattern forced Hibernate to
+     * hydrate the full join result in memory before paging, which timed out / returned
+     * empty pages after large DSS demo seeds. Items are loaded in the service layer.
+     */
+    @Query(
+        value = """
+            select o from Order o
+            where exists (
+                select 1 from OrderItem i
+                where i.order = o and i.seller.id = :sellerId
+            )
+            """,
+        countQuery = """
+            select count(o) from Order o
+            where exists (
+                select 1 from OrderItem i
+                where i.order = o and i.seller.id = :sellerId
+            )
+            """
+    )
+    Page<Order> findDistinctBySellerId(@Param("sellerId") Long sellerId, Pageable pageable);
+
+    @Query(
+        """
+        select count(o) from Order o
+        where o.status = :status
+          and exists (
+              select 1 from OrderItem i
+              where i.order = o and i.seller.id = :sellerId
+          )
+        """
+    )
+    long countBySellerIdAndStatus(
+        @Param("sellerId") Long sellerId,
+        @Param("status") OrderStatus status
+    );
+
+    @Query(
+        """
+        select o from Order o
+        where o.status = com.example.secdsp.modules.order.entity.OrderStatus.PENDING
+          and o.createdAt < :cutoff
+        """
+    )
+    List<Order> findPendingOlderThan(@Param("cutoff") OffsetDateTime cutoff);
 }

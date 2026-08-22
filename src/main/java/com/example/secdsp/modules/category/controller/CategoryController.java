@@ -48,7 +48,7 @@ public class CategoryController {
         @ApiResponse(responseCode = "409", description = "Category already exists", content = @Content)
     })
     @PostMapping
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN','SELLER','MANAGER')")
     public ResponseEntity<BaseResponse<CategoryResponse>> createCategory(
         @Valid @RequestBody CreateCategoryRequest request
     ) {
@@ -74,7 +74,7 @@ public class CategoryController {
         @ApiResponse(responseCode = "404", description = "Category not found", content = @Content)
     })
     @PutMapping("/{id}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN','MANAGER')")
     public ResponseEntity<BaseResponse<CategoryResponse>> updateCategory(
 
         @Parameter(

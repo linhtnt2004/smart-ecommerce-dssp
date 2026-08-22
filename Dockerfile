@@ -1,14 +1,40 @@
-FROM eclipse-temurin:17-jdk AS builder
+# Railway / production — Spring Boot JAR
+FROM eclipse-temurin:17-jdk-jammy AS builder
 WORKDIR /build
 
+ENV GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m -Dorg.gradle.daemon=false"
+
+COPY gradlew settings.gradle.kts build.gradle.kts ./
+COPY gradle ./gradle
+RUN chmod +x gradlew && ./gradlew --version
+
 COPY . .
+RUN chmod +x gradlew \
+  && ./gradlew bootJar -x test --no-daemon --stacktrace \
+  && JAR="$(ls -1 build/libs/*.jar | grep -v plain | head -n 1)" \
+  && test -n "$JAR" \
+  && cp "$JAR" /build/app.jar \
+  && echo "Packed $JAR -> /build/app.jar"
 
-RUN ./gradlew bootJar -x test
-
-FROM eclipse-temurin:17-jdk
+FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
 
-COPY --from=builder /build/build/libs/*.jar app.jar
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl \
+  && rm -rf /var/lib/apt/lists/*
 
+COPY --from=builder /build/app.jar /app/app.jar
+COPY --from=builder /build/models /app/models
+COPY start.sh /app/start.sh
+RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
+
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV PORT=8080
+ENV DSS_MODEL_DIR=/app/models/demand
+ENV DSS_MODEL_REQUIRED=true
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=10 \
+  CMD curl -fsS "http://127.0.0.1:${PORT}/actuator/health/liveness" || curl -fsS "http://127.0.0.1:${PORT}/healthz" || exit 1
+
+ENTRYPOINT ["/app/start.sh"]

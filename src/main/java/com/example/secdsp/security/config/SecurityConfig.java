@@ -38,30 +38,56 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
             .csrf(AbstractHttpConfigurer::disable)
+            .cors(cors -> {})
             .sessionManagement(session -> session
                 .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
+                // CORS preflight must never require auth
+                .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+
                 // 1. Auth public endpoints
                 .requestMatchers(
                     HttpMethod.POST,
                     "/api/v1/auth/login",
                     "/api/v1/auth/register",
-                    "/api/v1/auth/refresh"
+                    "/api/v1/auth/refresh",
+                    "/api/v1/auth/resend-otp",
+                    "/api/v1/auth/verify-email",
+                    "/api/v1/auth/forgot-password",
+                    "/api/v1/auth/verify-reset-otp",
+                    "/api/v1/auth/update-password"
                 ).permitAll()
 
                 // 2. Public Read Endpoints (Cho phép khách xem sản phẩm, danh mục,...)
                 .requestMatchers(
                     HttpMethod.GET,
                     "/api/v1/products/**",
-                    "/api/v1/categories/**"
+                    "/api/v1/categories/**",
+                    "/api/v1/vouchers/public",
+                    "/api/v1/sellers/*/momo"
                 ).permitAll()
 
-                // 3. Swagger & OAuth2 endpoints
+                // Local product images (Cloudinary fallback)
+                .requestMatchers(HttpMethod.GET, "/uploads/**").permitAll()
+
+                // 3. Swagger, OAuth2, health (Railway liveness/readiness)
                 .requestMatchers(
                     "/swagger-ui/**",
                     "/swagger-ui.html",
                     "/v3/api-docs/**",
-                    "/oauth2/**"
+                    "/oauth2/**",
+                    "/actuator/health",
+                    "/actuator/health/**",
+                    "/actuator/info",
+                    "/healthz"
+                ).permitAll()
+
+                // Payment gateway callbacks (MoMo / VNPay)
+                .requestMatchers(
+                    "/api/v1/payments/momo-ipn",
+                    "/api/v1/payments/momo-return",
+                    "/api/v1/payments/vnpay-return",
+                    "/api/v1/payments/vnpay-ipn"
                 ).permitAll()
 
                 // 4. Các request còn lại bắt buộc cần Authentication
@@ -81,8 +107,7 @@ public class SecurityConfig {
 
     @Bean
     public DaoAuthenticationProvider authenticationProvider() {
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
-        provider.setUserDetailsService(customUserDetailsService);
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(customUserDetailsService);
         provider.setPasswordEncoder(passwordEncoder());
         return provider;
     }

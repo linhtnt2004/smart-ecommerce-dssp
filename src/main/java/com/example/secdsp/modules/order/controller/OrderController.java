@@ -2,6 +2,7 @@ package com.example.secdsp.modules.order.controller;
 
 import com.example.secdsp.common.api.BaseResponse;
 import com.example.secdsp.modules.order.dto.request.CreateOrderRequest;
+import com.example.secdsp.modules.order.dto.request.UpdateOrderStatusRequest;
 import com.example.secdsp.modules.order.dto.response.OrderDetailResponse;
 import com.example.secdsp.modules.order.dto.response.OrderResponse;
 import com.example.secdsp.modules.order.service.OrderService;
@@ -95,6 +96,20 @@ public class OrderController {
         );
     }
 
+    @GetMapping("/seller")
+    @PreAuthorize("hasAnyRole('SELLER','ADMIN','MANAGER')")
+    public ResponseEntity<BaseResponse<Page<OrderResponse>>>
+    getSellerOrders(
+        @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC)
+        Pageable pageable
+    ) {
+        return ResponseEntity.ok(
+            BaseResponse.success(
+                orderService.getSellerOrders(pageable)
+            )
+        );
+    }
+
     @Operation(
         summary = "Get order details",
         description = """
@@ -122,6 +137,47 @@ public class OrderController {
         return ResponseEntity.ok(
             BaseResponse.success(
                 orderService.getOrderById(id)
+            )
+        );
+    }
+
+    @PutMapping("/{id}/status")
+    @PreAuthorize("hasAnyRole('SELLER','ADMIN','MANAGER')")
+    public ResponseEntity<BaseResponse<OrderResponse>>
+    updateOrderStatus(
+        @PathVariable Long id,
+        @Valid @RequestBody UpdateOrderStatusRequest request
+    ) {
+        return ResponseEntity.ok(
+            BaseResponse.success(
+                "Order status updated",
+                orderService.updateOrderStatus(id, request)
+            )
+        );
+    }
+
+    @PostMapping("/{id}/confirm-momo")
+    @PreAuthorize("hasAnyRole('SELLER','ADMIN','MANAGER')")
+    public ResponseEntity<BaseResponse<OrderResponse>> confirmMomoTransfer(
+        @PathVariable Long id
+    ) {
+        return ResponseEntity.ok(
+            BaseResponse.success(
+                "MoMo transfer confirmed",
+                orderService.confirmMomoTransfer(id)
+            )
+        );
+    }
+
+    @PostMapping("/{id}/complete-momo")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<BaseResponse<OrderResponse>> completeMomoTransfer(
+        @PathVariable Long id
+    ) {
+        return ResponseEntity.ok(
+            BaseResponse.success(
+                "MoMo payment completed",
+                orderService.completeMomoTransfer(id)
             )
         );
     }

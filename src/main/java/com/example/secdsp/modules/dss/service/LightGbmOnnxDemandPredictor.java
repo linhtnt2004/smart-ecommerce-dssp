@@ -1,0 +1,334 @@
+package com.example.secdsp.modules.dss.service;
+
+import ai.onnxruntime.OnnxTensor;
+import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtException;
+import ai.onnxruntime.OrtSession;
+import jakarta.annotation.PreDestroy;
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.lang.reflect.Array;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalDouble;
+
+@Component
+@Slf4j
+public class LightGbmOnnxDemandPredictor {
+
+    private static final String GLOBAL_MODEL_FILE = "global-demand.onnx";
+
+    static final List<String> FEATURE_NAMES = List.of(
+        "history_days",
+        "day_of_week",
+        "day_of_month",
+        "month",
+        "is_weekend",
+        "lag_1",
+        "lag_7",
+        "rolling_mean_7",
+        "rolling_mean_14",
+        "rolling_mean_30",
+        "rolling_std_7",
+        "momentum_7",
+        "trend_slope_14"
+    );
+
+    private final Path modelDirectory;
+    private final boolean modelRequired;
+    private volatile OrtEnvironment environment;
+    private volatile OrtSession session;
+
+    public LightGbmOnnxDemandPredictor(String modelDirectory) {
+        this(modelDirectory, false);
+    }
+
+    @Autowired
+    public LightGbmOnnxDemandPredictor(
+        @Value("${app.dss.model-dir:models/demand}") String modelDirectory,
+        @Value("${app.dss.model-required:false}") boolean modelRequired
+    ) {
+        this.modelDirectory = Path.of(modelDirectory).toAbsolutePath().normalize();
+        this.modelRequired = modelRequired;
+    }
+
+    /**
+     * Validate the artifact and perform one real inference during startup.
+     * Production must fail deployment if the model cannot run; otherwise the
+     * application would appear healthy while silently serving baseline output.
+     */
+    @PostConstruct
+    void validateModelOnStartup() {
+        Path path = modelPath();
+        if (!Files.isRegularFile(path)) {
+            String message = "Demand model file not found: " + path;
+            if (modelRequired) {
+                throw new IllegalStateException(message);
+            }
+            log.warn(message + ". Baseline fallback remains enabled.");
+            return;
+        }
+
+        try {
+            OrtSession loaded = sessionFor();
+            if (loaded.getInputNames().isEmpty() || loaded.getOutputNames().isEmpty()) {
+                throw new IllegalStateException("ONNX model has no input or output node");
+            }
+
+            OptionalDouble smoke = runPrediction(
+                0L,
+                LocalDate.now(),
+                List.of(0L, 0L, 0L, 0L, 0L, 0L, 0L),
+                7
+            );
+            if (smoke.isEmpty()) {
+                throw new IllegalStateException("ONNX smoke inference returned no finite value");
+            }
+
+            log.info(
+                "Demand ONNX model ready: path={}, bytes={}, inputs={}, outputs={}, smokePrediction={}",
+                path,
+                Files.size(path),
+                loaded.getInputNames(),
+                loaded.getOutputNames(),
+                smoke.getAsDouble()
+            );
+        } catch (Exception | LinkageError exception) {
+            String message = "Demand ONNX model failed startup validation: " + path;
+            if (modelRequired) {
+                throw new IllegalStateException(message, exception);
+            }
+            log.warn(message + ". Baseline fallback remains enabled.", exception);
+        }
+    }
+
+    public boolean isModelAvailable(Long productId) {
+        return productId != null && Files.isRegularFile(modelPath());
+    }
+
+    public OptionalDouble predict(
+        Long productId,
+        LocalDate targetDate,
+        List<Long> history,
+        int historyDays
+    ) {
+        if (!isModelAvailable(productId)) {
+            return OptionalDouble.empty();
+        }
+
+        try {
+            return runPrediction(productId, targetDate, history, historyDays);
+        } catch (Exception | LinkageError exception) {
+            log.warn(
+                "Cannot run global LightGBM ONNX model for product {} at runtime. Falling back for this forecast point.",
+                productId,
+                exception
+            );
+            return OptionalDouble.empty();
+        }
+    }
+
+    private OptionalDouble runPrediction(
+        Long productId,
+        LocalDate targetDate,
+        List<Long> history,
+        int historyDays
+    ) throws Exception {
+        OrtSession loaded = sessionFor();
+        String inputName = loaded.getInputNames().iterator().next();
+        float[] features = buildFeatures(targetDate, history, historyDays);
+        OrtEnvironment runtimeEnvironment = environment();
+
+        try (
+            OnnxTensor input = OnnxTensor.createTensor(
+                runtimeEnvironment,
+                new float[][] { features }
+            );
+            OrtSession.Result result = loaded.run(Map.of(inputName, input))
+        ) {
+            if (result.size() == 0) {
+                return OptionalDouble.empty();
+            }
+            double prediction = extractPrediction(result.get(0).getValue());
+            if (!Double.isFinite(prediction)) {
+                return OptionalDouble.empty();
+            }
+            return OptionalDouble.of(Math.max(0.0, prediction));
+        }
+    }
+
+    float[] buildFeatures(
+        LocalDate targetDate,
+        List<Long> completeHistory,
+        int requestedHistoryDays
+    ) {
+        int historyDays = Math.max(1, requestedHistoryDays);
+        int start = Math.max(0, completeHistory.size() - historyDays);
+        List<Long> history = new ArrayList<>(
+            completeHistory.subList(start, completeHistory.size())
+        );
+
+        double recentAverage = averageOfTail(history, 7);
+        double previousAverage = averageOfPreviousTail(history, 7);
+
+        return new float[] {
+            historyDays,
+            targetDate.getDayOfWeek().getValue(),
+            targetDate.getDayOfMonth(),
+            targetDate.getMonthValue(),
+            targetDate.getDayOfWeek().getValue() >= 6 ? 1.0f : 0.0f,
+            (float) lag(history, 1),
+            (float) lag(history, 7),
+            (float) recentAverage,
+            (float) averageOfTail(history, 14),
+            (float) averageOfTail(history, 30),
+            (float) standardDeviationOfTail(history, 7),
+            (float) (recentAverage - previousAverage),
+            (float) linearRegressionSlopeOfTail(history, 14)
+        };
+    }
+
+    private OrtSession sessionFor() throws OrtException {
+        OrtSession existing = session;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            if (session == null) {
+                session = environment().createSession(modelPath().toString());
+                log.info("Loaded global LightGBM ONNX demand model");
+            }
+            return session;
+        }
+    }
+
+    private OrtEnvironment environment() {
+        OrtEnvironment existing = environment;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            if (environment == null) {
+                environment = OrtEnvironment.getEnvironment();
+            }
+            return environment;
+        }
+    }
+
+    private Path modelPath() {
+        return modelDirectory.resolve(GLOBAL_MODEL_FILE);
+    }
+
+    static double extractPrediction(Object output) {
+        if (output instanceof Number value) {
+            return value.doubleValue();
+        }
+        if (output != null && output.getClass().isArray()) {
+            int length = Array.getLength(output);
+            if (length > 0) {
+                return extractPrediction(Array.get(output, 0));
+            }
+        }
+        throw new IllegalStateException(
+            "Unsupported ONNX output type: "
+                + (output == null ? "null" : output.getClass().getName())
+        );
+    }
+
+    private static double lag(List<Long> history, int days) {
+        int index = history.size() - days;
+        return index >= 0 ? history.get(index) : 0.0;
+    }
+
+    private static double averageOfTail(List<Long> history, int window) {
+        if (history.isEmpty()) {
+            return 0.0;
+        }
+        int start = Math.max(0, history.size() - window);
+        return history.subList(start, history.size())
+            .stream()
+            .mapToLong(Long::longValue)
+            .average()
+            .orElse(0.0);
+    }
+
+    private static double averageOfPreviousTail(List<Long> history, int window) {
+        int end = Math.max(0, history.size() - window);
+        if (end == 0) {
+            return averageOfTail(history, window);
+        }
+        int start = Math.max(0, end - window);
+        return history.subList(start, end)
+            .stream()
+            .mapToLong(Long::longValue)
+            .average()
+            .orElse(0.0);
+    }
+
+    private static double standardDeviationOfTail(List<Long> history, int window) {
+        if (history.isEmpty()) {
+            return 0.0;
+        }
+        int start = Math.max(0, history.size() - window);
+        List<Long> tail = history.subList(start, history.size());
+        double average = tail.stream()
+            .mapToLong(Long::longValue)
+            .average()
+            .orElse(0.0);
+        double variance = tail.stream()
+            .mapToDouble(value -> Math.pow(value - average, 2))
+            .average()
+            .orElse(0.0);
+        return Math.sqrt(variance);
+    }
+
+    private static double linearRegressionSlopeOfTail(
+        List<Long> history,
+        int window
+    ) {
+        int start = Math.max(0, history.size() - window);
+        List<Long> tail = history.subList(start, history.size());
+        int size = tail.size();
+        if (size < 2) {
+            return 0.0;
+        }
+
+        double sumX = 0.0;
+        double sumY = 0.0;
+        double sumXY = 0.0;
+        double sumX2 = 0.0;
+        for (int index = 0; index < size; index++) {
+            double x = index + 1.0;
+            double y = tail.get(index);
+            sumX += x;
+            sumY += y;
+            sumXY += x * y;
+            sumX2 += x * x;
+        }
+        double denominator = (size * sumX2) - (sumX * sumX);
+        return denominator == 0.0
+            ? 0.0
+            : ((size * sumXY) - (sumX * sumY)) / denominator;
+    }
+
+    @PreDestroy
+    public void close() {
+        OrtSession existing = session;
+        if (existing != null) {
+            try {
+                existing.close();
+            } catch (OrtException exception) {
+                log.debug("Cannot close ONNX session cleanly", exception);
+            }
+            session = null;
+        }
+    }
+}

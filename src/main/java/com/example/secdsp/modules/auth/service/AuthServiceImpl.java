@@ -1,8 +1,6 @@
 package com.example.secdsp.modules.auth.service;
 
-import com.example.secdsp.common.exception.BusinessException;
-import com.example.secdsp.common.exception.ResourceNotFoundException;
-import com.example.secdsp.common.exception.UnauthorizedException;
+import com.example.secdsp.common.exception.*;
 import com.example.secdsp.common.util.SecurityUtils;
 import com.example.secdsp.modules.auth.dto.request.LoginRequest;
 import com.example.secdsp.modules.auth.dto.request.RegisterRequest;
@@ -26,12 +24,13 @@ import com.example.secdsp.security.user.UserDetailsImpl;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.*;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.OffsetDateTime;
 
@@ -48,6 +47,7 @@ public class AuthServiceImpl implements AuthService {
     private final PasswordEncoder passwordEncoder;
     private final OtpService otpService;
     private final EmailService emailService;
+    private final PlatformTransactionManager transactionManager;
     private final EmailOtpRepository emailOtpRepository;
 
     @Value("${app.jwt.expiration-ms}")
@@ -56,10 +56,13 @@ public class AuthServiceImpl implements AuthService {
     @Override
     @Transactional(readOnly = true)
     public LoginResponse login(LoginRequest request) {
+        String email = request.getEmail() == null
+            ? ""
+            : request.getEmail().trim().toLowerCase();
         try {
             Authentication authentication = authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(
-                    request.getEmail(),
+                    email,
                     request.getPassword()
                 )
             );
@@ -67,7 +70,7 @@ public class AuthServiceImpl implements AuthService {
             UserDetailsImpl userDetails = (UserDetailsImpl) authentication.getPrincipal();
 
             User user = userRepository.findById(userDetails.getId())
-                .orElseThrow();
+                .orElseThrow(() -> new ResourceNotFoundException("User", userDetails.getId()));
 
             if (user.getStatus() == UserStatus.PENDING) {
                 throw new UnauthorizedException("Please verify your email first");
@@ -91,6 +94,8 @@ public class AuthServiceImpl implements AuthService {
             throw new UnauthorizedException("Account is inactive");
         } catch (LockedException ex) {
             throw new UnauthorizedException("Account is blocked");
+        } catch (UnauthorizedException ex) {
+            throw ex;
         }
     }
 
@@ -106,22 +111,32 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    @Transactional
     public void register(RegisterRequest request) {
 
         if (!request.getPassword()
             .equals(request.getConfirmPassword())) {
             throw new BusinessException(
-                "Password confirmation does not match",
-                HttpStatus.BAD_REQUEST
+                ErrorCode.INVALID_REQUEST,
+                "Password confirmation does not match"
             );
         }
 
-        if (userRepository.existsByEmail(request.getEmail())) {
-            throw new BusinessException(
-                "Email already exists",
-                HttpStatus.CONFLICT
-            );
+        String email = request.getEmail().trim().toLowerCase();
+
+        if (userRepository.existsByEmail(email)) {
+            User existing = userRepository.findByEmail(email).orElse(null);
+            if (existing != null && existing.getStatus() == UserStatus.PENDING) {
+                try {
+                    String otp = otpService.resendOtp(email);
+                    emailService.sendOtp(email, otp);
+                } catch (Exception e) {
+                    log.error("Resend OTP on re-register failed for {}: {}", email, e.getMessage());
+                }
+                // Account already pending — FE should show OTP form
+                log.info("Pending account re-register; OTP form should be shown for {}", email);
+                return;
+            }
+            throw new ResourceAlreadyExistsException("Email already exists");
         }
 
         Role customerRole = roleRepository.findByName(
@@ -132,90 +147,130 @@ public class AuthServiceImpl implements AuthService {
                                  UserRole.CUSTOMER.name()
                              ));
 
-        User user = new User();
-        user.setFullName(request.getFullName());
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        String otp = tx.execute(status -> {
+            User user = new User();
+            user.setFullName(request.getFullName());
+            user.setEmail(email);
+            user.setUsername(email);
+            user.setPassword(passwordEncoder.encode(request.getPassword()));
+            user.setRole(customerRole);
+            user.setStatus(UserStatus.PENDING);
+            userRepository.save(user);
+            return otpService.generateOtp(email);
+        });
 
-        String email = request.getEmail().trim().toLowerCase();
+        try {
+            emailService.sendOtp(email, otp);
+            log.info("Registration OTP sent to {}", email);
+        } catch (Exception e) {
+            // OTP already in DB — still return success so FE shows OTP + Resend
+            log.error("Failed to send registration OTP to {}: {}", email, e.getMessage());
+        }
 
-        user.setEmail(email);
-
-        user.setUsername(email);
-
-        user.setPassword(
-            passwordEncoder.encode(
-                request.getPassword()
-            )
-        );
-
-        user.setRole(customerRole);
-        user.setStatus(UserStatus.PENDING);
-
-        userRepository.save(user);
-
-        String otp = otpService.generateOtp(email);
-        emailService.sendOtp(email, otp);
-
-        log.info("New customer registered: {}", email);
+        log.info("New customer registered (PENDING): {}", email);
     }
 
     @Override
     @Transactional
     public void resendOtp(String email) {
 
-        User user = userRepository.findByEmail(email)
+        String normalized = email == null ? "" : email.trim().toLowerCase();
+
+        User user = userRepository.findByEmail(normalized)
             .orElseThrow(() -> new BusinessException(
-                "Invalid request",
-                HttpStatus.BAD_REQUEST
+                ErrorCode.INVALID_REQUEST,
+                "Invalid request"
             ));
 
         if (user.getStatus() != UserStatus.PENDING) {
             throw new BusinessException(
-                "Email already verified or account not eligible for OTP resend",
-                HttpStatus.BAD_REQUEST
+                ErrorCode.BUSINESS_ERROR,
+                "Email already verified or account not eligible for OTP resend"
             );
         }
 
-        String otp = otpService.resendOtp(email);
+        String otp = otpService.resendOtp(normalized);
 
-        emailService.sendOtp(email, otp);
+        emailService.sendOtp(normalized, otp);
+    }
+
+    @Override
+    @Transactional
+    public void verifyEmail(VerifyOtpRequest request) {
+        if (request.getEmail() == null || request.getOtp() == null
+            || request.getEmail().isBlank() || request.getOtp().isBlank()) {
+            throw new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Email and OTP are required"
+            );
+        }
+
+        String email = request.getEmail().trim().toLowerCase();
+        String otp = request.getOtp().trim();
+
+        User user = userRepository.findByEmail(email)
+            .orElseThrow(() -> new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Invalid email or OTP"
+            ));
+
+        if (user.getStatus() != UserStatus.PENDING) {
+            throw new BusinessException(
+                ErrorCode.BUSINESS_ERROR,
+                "Email already verified or account cannot be activated with OTP"
+            );
+        }
+
+        otpService.validateOtp(email, otp);
+
+        user.setStatus(UserStatus.ACTIVE);
+        userRepository.save(user);
+        log.info("Email verified, account activated: {}", email);
     }
 
     @Override
     @Transactional
     public void forgotPassword(String email) {
 
-        User user = userRepository.findByEmail(email)
-            .orElseThrow(() ->
-                             new BusinessException("Email does not exist", HttpStatus.BAD_REQUEST));
+        String normalized = email == null ? "" : email.trim().toLowerCase();
+
+        User user = userRepository.findByEmail(normalized)
+            .orElseThrow(() -> new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "Email does not exist"
+            ));
 
         if (user.getStatus() == UserStatus.BLOCKED) {
-            throw new BusinessException(
-                "Account is blocked",
-                HttpStatus.FORBIDDEN
-            );
+            throw new ForbiddenException("Account is blocked");
         }
 
         if (user.getStatus() != UserStatus.ACTIVE) {
             throw new BusinessException(
-                "Account is not active",
-                HttpStatus.BAD_REQUEST
+                ErrorCode.BUSINESS_ERROR,
+                "Account is not active"
             );
         }
 
-        String otp = otpService.generateOtp(email);
-
-        emailService.sendResetPasswordOtp(email, otp);
+        String otp = otpService.generateOtp(normalized);
+        emailService.sendResetPasswordOtp(normalized, otp);
     }
 
     @Override
     @Transactional
     public void verifyResetOtp(VerifyOtpRequest request) {
 
-        User user = userRepository.findByEmail(request.getEmail())
-            .orElseThrow(() ->
-                             new BusinessException("Invalid request", HttpStatus.BAD_REQUEST));
+        String email = request.getEmail() == null
+            ? ""
+            : request.getEmail().trim().toLowerCase();
 
-        otpService.validateOtp(request.getEmail(), request.getOtp());
+        userRepository.findByEmail(email)
+            .orElseThrow(() -> new ResourceNotFoundException(
+                "User with email",
+                email
+            ));
+
+        otpService.validateOtp(email, request.getOtp());
 
     }
 
@@ -227,29 +282,40 @@ public class AuthServiceImpl implements AuthService {
             .equals(request.getConfirmPassword())) {
 
             throw new BusinessException(
-                "Password confirmation does not match",
-                HttpStatus.BAD_REQUEST
+                ErrorCode.INVALID_REQUEST,
+                "Password confirmation does not match"
             );
         }
 
-        User user = userRepository.findByEmail(request.getEmail())
-            .orElseThrow(() ->
-                             new BusinessException("Invalid request", HttpStatus.BAD_REQUEST));
+        String email = request.getEmail() == null
+            ? ""
+            : request.getEmail().trim().toLowerCase();
+
+        User user = userRepository.findByEmail(email)
+            .orElseThrow(() -> new ResourceNotFoundException(
+                "User with email",
+                email
+            ));
 
         EmailOtp latestOtp = emailOtpRepository
-            .findTopByEmailOrderByIdDesc(request.getEmail())
-            .orElseThrow(() ->
-                             new BusinessException("Invalid request", HttpStatus.BAD_REQUEST));
+            .findTopByEmailOrderByIdDesc(email)
+            .orElseThrow(() -> new BusinessException(
+                ErrorCode.INVALID_REQUEST,
+                "OTP not found"
+            ));
 
         if (!latestOtp.isVerified()) {
             throw new BusinessException(
-                "OTP verification required",
-                HttpStatus.BAD_REQUEST
+                ErrorCode.BUSINESS_ERROR,
+                "OTP verification required"
             );
         }
 
         if (latestOtp.getExpiryTime().isBefore(OffsetDateTime.now())) {
-            throw new BusinessException("OTP expired", HttpStatus.BAD_REQUEST);
+            throw new BusinessException(
+                ErrorCode.BUSINESS_ERROR,
+                "OTP expired"
+            );
         }
 
         user.setPassword(passwordEncoder.encode(request.getNewPassword()));

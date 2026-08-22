@@ -17,12 +17,19 @@ repositories {
     mavenCentral()
 }
 
+// Railway Postgres is often 18.x — Boot 3.5.14 manages Flyway 11.7.2 (PG≤17 warning).
+// Pin a newer Flyway that recognizes PostgreSQL 18 cleanly.
+extra["flyway.version"] = "11.14.1"
+
 // Version management
 val mapstructVersion = "1.6.3"
 val lombokMapstructBindingVersion = "0.2.0"
 val jjwtVersion = "0.12.5"
 
 dependencies {
+    // --- OpenAI SDK ---
+    implementation("com.google.genai:google-genai:0.3.0")
+
     // --- Spring Boot Starters ---
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-security")
@@ -31,6 +38,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-mail")
     implementation("org.springframework.boot:spring-boot-starter-oauth2-client")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
 
     // --- Database & Migration ---
     implementation("org.flywaydb:flyway-core")
@@ -46,6 +54,7 @@ dependencies {
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.16")
     implementation("com.github.slugify:slugify:3.0.4")
     implementation("com.cloudinary:cloudinary-http44:1.39.0") // Thư viện Upload ảnh sản phẩm
+    implementation("com.microsoft.onnxruntime:onnxruntime:1.23.2")
 
     // --- Lombok & MapStruct ---
     compileOnly("org.projectlombok:lombok")
@@ -62,4 +71,13 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootRun") {
+    jvmArgs("-Duser.timezone=Asia/Ho_Chi_Minh")
+}
+
+// Only the Boot fat JAR (avoids cp *.jar picking *-plain.jar in Docker)
+tasks.named<Jar>("jar") {
+    enabled = false
 }

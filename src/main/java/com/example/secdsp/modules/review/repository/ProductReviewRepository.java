@@ -23,14 +23,14 @@ public interface ProductReviewRepository extends JpaRepository<ProductReview, Lo
             FROM ProductReview r
             WHERE r.product.id = :productId
         """)
-    Object[] getRatingSummary(@Param("productId") Long productId);
+    List<Object[]> getRatingSummary(@Param("productId") Long productId);
 
     @Query("""
             select avg(r.rating), count(r)
             from ProductReview r
             where r.product.seller.id = :sellerId
         """)
-    Object[] getSellerRatingSummary(Long sellerId);
+    List<Object[]> getSellerRatingSummary(Long sellerId);
 
     @Query("""
             select r.rating, count(r)
@@ -42,4 +42,12 @@ public interface ProductReviewRepository extends JpaRepository<ProductReview, Lo
 
     List<ProductReview>
     findTop5ByProduct_Seller_IdOrderByCreatedAtDesc(Long sellerId);
+
+    @Query("""
+            SELECT r.product.id, AVG(r.rating), COUNT(r)
+            FROM ProductReview r
+            WHERE r.product.id IN :productIds
+            GROUP BY r.product.id
+        """)
+    List<Object[]> getRatingSummariesByProductIds(@Param("productIds") List<Long> productIds);
 }

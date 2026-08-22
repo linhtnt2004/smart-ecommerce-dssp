@@ -3,11 +3,13 @@ package com.example.secdsp.modules.product.service;
 import com.example.secdsp.common.exception.BusinessException;
 import com.example.secdsp.common.exception.ResourceNotFoundException;
 import com.example.secdsp.common.exception.UnauthorizedException;
+import com.example.secdsp.common.util.PublicAssetUrlResolver;
 import com.example.secdsp.common.util.SecurityUtils;
 import com.example.secdsp.infrastructure.cloudinary.CloudinaryService;
 import com.example.secdsp.modules.category.dto.internal.CategoryInfo;
 import com.example.secdsp.modules.category.entity.Category;
 import com.example.secdsp.modules.category.service.CategoryService;
+import com.example.secdsp.modules.product.dto.internal.PriceHistoryInfo;
 import com.example.secdsp.modules.product.dto.internal.ProductInfo;
 import com.example.secdsp.modules.product.dto.internal.ProductSummaryInfo;
 import com.example.secdsp.modules.product.dto.request.*;
@@ -18,7 +20,12 @@ import com.example.secdsp.modules.product.entity.*;
 import com.example.secdsp.modules.product.mapper.PriceHistoryMapper;
 import com.example.secdsp.modules.product.mapper.ProductMapper;
 import com.example.secdsp.modules.product.repository.PriceHistoryRepository;
+import com.example.secdsp.modules.product.repository.ProductCatalogQueryRepository;
 import com.example.secdsp.modules.product.repository.ProductRepository;
+import com.example.secdsp.modules.inventory.entity.Inventory;
+import com.example.secdsp.modules.inventory.repository.InventoryRepository;
+import com.example.secdsp.modules.order.repository.OrderItemRepository;
+import com.example.secdsp.modules.review.repository.ProductReviewRepository;
 import com.example.secdsp.modules.user.dto.internal.UserInfo;
 import com.example.secdsp.modules.user.entity.User;
 import com.example.secdsp.modules.user.entity.UserRole;
@@ -35,6 +42,8 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -45,14 +54,20 @@ import java.util.stream.Collectors;
 public class ProductServiceImpl implements ProductService {
 
     private final ProductRepository productRepository;
+    private final ProductCatalogQueryRepository productCatalogQueryRepository;
+    private final ProductReviewRepository productReviewRepository;
+    private final OrderItemRepository orderItemRepository;
     private final PriceHistoryRepository priceHistoryRepository;
+    private final InventoryRepository inventoryRepository;
     private final ProductMapper productMapper;
     private final PriceHistoryMapper priceHistoryMapper;
     private final CategoryService categoryService;
     private final UserService userService;
     private final Slugify slugify;
     private final CloudinaryService cloudinaryService;
+    private final PublicAssetUrlResolver publicAssetUrlResolver;
 
+    private static final int MIN_PRODUCT_IMAGES = 1;
     private static final int MAX_PRODUCT_IMAGES = 5;
 
     @Override
@@ -96,6 +111,10 @@ public class ProductServiceImpl implements ProductService {
 
         if (request.getImages() != null) {
             handleProductImagesForCreate(product, request.getImages());
+        } else {
+            throw new BusinessException(
+                "Mỗi sản phẩm cần ít nhất " + MIN_PRODUCT_IMAGES + " ảnh."
+            );
         }
 
         if (request.getAttributes() != null) {
@@ -103,8 +122,15 @@ public class ProductServiceImpl implements ProductService {
         }
 
         Product saved = productRepository.save(product);
+        ensureInventoryRow(saved);
         log.info("Product created successfully with ID: {}", saved.getId());
-        return productMapper.toProductResponse(saved);
+        ProductResponse response = productMapper.toProductResponse(saved);
+        response.setAvailableQuantity(
+            inventoryRepository.findByProduct_Id(saved.getId())
+                .map(Inventory::getAvailableQuantity)
+                .orElse(0)
+        );
+        return response;
     }
 
     @Transactional
@@ -164,6 +190,14 @@ public class ProductServiceImpl implements ProductService {
             existingProduct.setCategory(categoryRef);
         }
 
+        if (request.getImages() != null) {
+            handleProductImagesForUpdate(existingProduct, request.getImages());
+        }
+
+        if (request.getAttributes() != null) {
+            handleProductAttributesForUpdate(existingProduct, request.getAttributes());
+        }
+
         Product updatedProduct = productRepository.save(existingProduct);
 
         log.info("Product updated successfully with ID: {}", updatedProduct.getId());
@@ -214,7 +248,14 @@ public class ProductServiceImpl implements ProductService {
         log.debug("Fetching product by ID: {}", id);
         Product product = productRepository.findById(id)
             .orElseThrow(() -> new ResourceNotFoundException("Product", id));
-        return productMapper.toProductDetailResponse(product);
+        ProductDetailResponse response = productMapper.toProductDetailResponse(product);
+        normalizeDetailImageUrls(response);
+        response.setAvailableQuantity(
+            inventoryRepository.findByProduct_Id(id)
+                .map(Inventory::getAvailableQuantity)
+                .orElse(0)
+        );
+        return response;
     }
 
     @Override
@@ -223,14 +264,114 @@ public class ProductServiceImpl implements ProductService {
         String keyword,
         Long categoryId,
         Long sellerId,
+        String sort,
         Pageable pageable
     ) {
         log.debug(
-            "Fetching products with keyword: {}, categoryId: {}, sellerId: {}, pageable: {}",
-            keyword, categoryId, sellerId, pageable
+            "Fetching products with keyword: {}, categoryId: {}, sellerId: {}, sort: {}, pageable: {}",
+            keyword, categoryId, sellerId, sort, pageable
         );
-        return productRepository.searchProducts(keyword, categoryId, sellerId, pageable)
-            .map(productMapper::toProductResponse);
+
+        Page<Long> idPage = productCatalogQueryRepository.searchProductIds(
+            keyword,
+            categoryId,
+            sellerId,
+            sort,
+            pageable
+        );
+        List<Long> ids = idPage.getContent();
+        if (ids.isEmpty()) {
+            return Page.empty(pageable);
+        }
+
+        Map<Long, Product> productById = productRepository.findByIdIn(ids).stream()
+            .collect(Collectors.toMap(Product::getId, Function.identity(), (a, b) -> a));
+        List<Product> orderedProducts = ids.stream()
+            .map(productById::get)
+            .filter(Objects::nonNull)
+            .toList();
+
+        Map<Long, Integer> stockByProduct = loadAvailableQuantities(ids);
+        CatalogStats stats = loadCatalogStats(ids);
+
+        List<ProductResponse> content = orderedProducts.stream()
+            .map(product -> toCatalogProductResponse(product, stockByProduct, stats))
+            .toList();
+
+        return new org.springframework.data.domain.PageImpl<>(content, pageable, idPage.getTotalElements());
+    }
+
+    private ProductResponse toCatalogProductResponse(
+        Product product,
+        Map<Long, Integer> stockByProduct,
+        CatalogStats stats
+    ) {
+        ProductResponse response = productMapper.toProductResponse(product);
+        response.setPrimaryImageUrl(
+            publicAssetUrlResolver.resolve(response.getPrimaryImageUrl())
+        );
+        response.setAvailableQuantity(stockByProduct.getOrDefault(product.getId(), 0));
+        RatingStats rating = stats.ratings().get(product.getId());
+        if (rating != null) {
+            response.setAverageRating(rating.average());
+            response.setReviewCount(rating.count());
+        } else {
+            response.setAverageRating(0.0);
+            response.setReviewCount(0L);
+        }
+        response.setSoldCount(stats.soldCounts().getOrDefault(product.getId(), 0L));
+        return response;
+    }
+
+    private void normalizeDetailImageUrls(ProductDetailResponse response) {
+        if (response == null || response.getImages() == null) {
+            return;
+        }
+        response.getImages().forEach(img ->
+            img.setImageUrl(publicAssetUrlResolver.resolve(img.getImageUrl()))
+        );
+    }
+
+    private CatalogStats loadCatalogStats(List<Long> productIds) {
+        if (productIds == null || productIds.isEmpty()) {
+            return new CatalogStats(Map.of(), Map.of());
+        }
+
+        Map<Long, RatingStats> ratings = new HashMap<>();
+        for (Object[] row : productReviewRepository.getRatingSummariesByProductIds(productIds)) {
+            Long productId = ((Number) row[0]).longValue();
+            double average = row[1] != null ? ((Number) row[1]).doubleValue() : 0.0;
+            long count = row[2] != null ? ((Number) row[2]).longValue() : 0L;
+            ratings.put(productId, new RatingStats(average, count));
+        }
+
+        Map<Long, Long> soldCounts = new HashMap<>();
+        for (Object[] row : orderItemRepository.getSoldQuantitiesByProductIds(productIds)) {
+            Long productId = ((Number) row[0]).longValue();
+            long qty = row[1] != null ? ((Number) row[1]).longValue() : 0L;
+            soldCounts.put(productId, qty);
+        }
+
+        return new CatalogStats(ratings, soldCounts);
+    }
+
+    private record RatingStats(double average, long count) {}
+
+    private record CatalogStats(
+        Map<Long, RatingStats> ratings,
+        Map<Long, Long> soldCounts
+    ) {}
+
+    private Map<Long, Integer> loadAvailableQuantities(List<Long> productIds) {
+        if (productIds == null || productIds.isEmpty()) {
+            return Map.of();
+        }
+        return inventoryRepository.findByProduct_IdIn(productIds).stream()
+            .collect(Collectors.toMap(
+                inv -> inv.getProduct().getId(),
+                Inventory::getAvailableQuantity,
+                (a, b) -> a
+            ));
     }
 
     @Override
@@ -248,6 +389,7 @@ public class ProductServiceImpl implements ProductService {
                 : null,
             product.getName(),
             product.getPrice(),
+            product.getCostPrice(),
             product.getStatus()
         );
     }
@@ -271,6 +413,29 @@ public class ProductServiceImpl implements ProductService {
 
     @Override
     @Transactional(readOnly = true)
+    public List<PriceHistoryInfo> getPriceHistoryInfo(
+        Long productId,
+        LocalDate fromDate,
+        LocalDate toDate
+    ) {
+        ZoneId zone = ZoneId.of("Asia/Ho_Chi_Minh");
+        return priceHistoryRepository
+            .findByProductAndDateRange(
+                productId,
+                fromDate.atStartOfDay(zone).toOffsetDateTime(),
+                toDate.plusDays(1).atStartOfDay(zone).toOffsetDateTime()
+            )
+            .stream()
+            .map(history -> new PriceHistoryInfo(
+                history.getOldPrice(),
+                history.getNewPrice(),
+                history.getChangedAt()
+            ))
+            .toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public ProductSummaryInfo getSellerProductSummary(Long sellerId) {
 
         long total = productRepository.countBySeller_Id(sellerId);
@@ -290,9 +455,14 @@ public class ProductServiceImpl implements ProductService {
         Product product,
         List<AddProductImageRequest> imageRequests
     ) {
+        if (imageRequests == null || imageRequests.isEmpty()) {
+            throw new BusinessException(
+                "Mỗi sản phẩm cần ít nhất " + MIN_PRODUCT_IMAGES + " ảnh."
+            );
+        }
 
         if (imageRequests.size() > MAX_PRODUCT_IMAGES) {
-            throw new BusinessException("Maximum 5 images allowed per product.");
+            throw new BusinessException("Mỗi sản phẩm chỉ được tối đa " + MAX_PRODUCT_IMAGES + " ảnh.");
         }
 
         Set<String> imageUrls = new HashSet<>();
@@ -313,6 +483,13 @@ public class ProductServiceImpl implements ProductService {
 
             ProductImage productImage = productMapper.toProductImage(imageRequest);
             productImage.setProduct(product);
+            if (productImage.getPublicId() == null || productImage.getPublicId().isBlank()) {
+                String fallbackId = imageRequest.getPublicId();
+                if (fallbackId == null || fallbackId.isBlank()) {
+                    fallbackId = "ext-" + UUID.randomUUID();
+                }
+                productImage.setPublicId(fallbackId);
+            }
 
             product.getProductImages().add(productImage);
         }
@@ -340,8 +517,17 @@ public class ProductServiceImpl implements ProductService {
         List<UpdateProductImageRequest> imageRequests
     ) {
 
+        if (imageRequests == null || imageRequests.isEmpty()) {
+            return;
+        }
+
         if (imageRequests.size() > MAX_PRODUCT_IMAGES) {
-            throw new BusinessException("Maximum 5 images allowed per product.");
+            throw new BusinessException("Mỗi sản phẩm chỉ được tối đa " + MAX_PRODUCT_IMAGES + " ảnh.");
+        }
+        if (imageRequests.size() < MIN_PRODUCT_IMAGES) {
+            throw new BusinessException(
+                "Mỗi sản phẩm cần ít nhất " + MIN_PRODUCT_IMAGES + " ảnh (tối đa " + MAX_PRODUCT_IMAGES + ")."
+            );
         }
 
         Set<String> imageUrls = new HashSet<>();
@@ -514,5 +700,20 @@ public class ProductServiceImpl implements ProductService {
         user.setId(currentUserId);
 
         return user;
+    }
+
+    /** Tạo dòng inventory mặc định để seller có thể chỉnh tồn ngay sau khi tạo SP */
+    private void ensureInventoryRow(Product product) {
+        if (inventoryRepository.findByProduct_Id(product.getId()).isPresent()) {
+            return;
+        }
+        Inventory inventory = Inventory.builder()
+            .product(product)
+            .availableQuantity(50)
+            .reservedQuantity(0)
+            .updatedAt(java.time.OffsetDateTime.now())
+            .build();
+        inventoryRepository.save(inventory);
+        log.info("Inventory row created for product {}", product.getId());
     }
 }
