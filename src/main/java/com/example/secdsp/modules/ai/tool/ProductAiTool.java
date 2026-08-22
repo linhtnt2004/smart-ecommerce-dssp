@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 @Component
@@ -14,23 +15,38 @@ import java.util.List;
 public class ProductAiTool {
 
     private static final int MAX_RESULTS = 10;
+    private static final int FETCH_SIZE = 50;
 
     private final ProductService productService;
 
-    public List<ProductResponse> searchProducts(String keyword) {
-        if (keyword == null || keyword.isBlank()) {
+    public List<ProductResponse> searchProducts(
+        String keyword,
+        BigDecimal minPrice,
+        BigDecimal maxPrice
+    ) {
+        String kw = (keyword == null || keyword.isBlank()) ? null : keyword.trim();
+
+        if (kw == null && minPrice == null && maxPrice == null) {
             return List.of();
         }
 
-        return productService
+        int fetchSize = (minPrice != null || maxPrice != null) ? FETCH_SIZE : MAX_RESULTS;
+
+        List<ProductResponse> products = productService
             .getProducts(
-                keyword.trim(),
+                kw,
                 null,
                 null,
                 null,
-                PageRequest.of(0, MAX_RESULTS)
+                PageRequest.of(0, fetchSize)
             )
             .getContent();
+
+        return products.stream()
+            .filter(p -> minPrice == null || p.getPrice().compareTo(minPrice) >= 0)
+            .filter(p -> maxPrice == null || p.getPrice().compareTo(maxPrice) <= 0)
+            .limit(MAX_RESULTS)
+            .toList();
     }
 
     public ProductDetailResponse getProductDetail(Long productId) {
